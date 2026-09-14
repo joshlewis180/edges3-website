@@ -1,0 +1,18 @@
+# /etc/systemd/system/edges-pipeline.timer
+# Option B part 2: calendar timer that fires edges-pipeline.service once
+# per day at EDGES_DAEMON_HOUR (default 02:00) local time.
+#
+# Persistent=true means if the box was off at the scheduled time, the
+# service runs on next boot.
+
+[Unit]
+Description=EDGES-3 daily analysis pipeline timer
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+AccuracySec=1min
+Unit=edges-pipeline.service
+
+[Install]
+WantedBy=timers.target
