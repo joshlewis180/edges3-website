@@ -70,8 +70,6 @@ def run_once(now: Optional[datetime] = None) -> Optional[Path]:
     # this run later. Daemon always uses defaults and save_2d_npz=False.
     daemon_defaults = {
         "cterms": 6, "wterms": 5,
-        "tcold": 306.5, "thot": 393.22, "tcab": 306.5,
-        "tload": 300.0, "tns": 1000.0,
         "fstart": 50.0, "fstop": 190.0,
         "wfstart": 50.0, "wfstop": 190.0,
         "save_2d_npz": False,

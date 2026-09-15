@@ -67,11 +67,6 @@ config.ensure_dirs()
 PIPELINE_DEFAULTS: Dict[str, Any] = {
     "cterms": 6,
     "wterms": 5,
-    "tcold": 306.5,
-    "thot": 393.22,
-    "tcab": 306.5,
-    "tload": 300.0,
-    "tns": 1000.0,
     "fstart": 50.0,
     "fstop": 190.0,
     "wfstart": 50.0,
@@ -80,8 +75,7 @@ PIPELINE_DEFAULTS: Dict[str, Any] = {
 }
 
 NUMERIC_PIPELINE_KEYS = (
-    "cterms", "wterms", "tcold", "thot", "tcab",
-    "tload", "tns", "fstart", "fstop", "wfstart", "wfstop",
+    "cterms", "wterms", "fstart", "fstop", "wfstart", "wfstop",
 )
 
 
@@ -349,12 +343,10 @@ def _find_existing_run(
 
 
 def _write_latest(source: str, run_id: str, dates: Dict[str, str]) -> None:
-    # Extract per-load actual temperatures and calibration parameters from
-    # the per-source manifest so the top banner can show "ambient @ time: X
-    # K" and the actual tcold/thot/tcab values used by the analysis, all
-    # without each plot needing to repeat the information in its title.
+    # Extract per-load actual temperatures from the per-source manifest so
+    # the top banner can show "ambient @ time: X K" without each plot
+    # needing to repeat the information in its title.
     actual_temps: Dict[str, Dict[str, Any]] = {}
-    parameters: Dict[str, Any] = {}
     source_root = config.USER_DIR if source == "user" else config.DAEMON_DIR
     src_manifest = source_root / "manifest.json"
     if src_manifest.exists():
@@ -368,19 +360,6 @@ def _write_latest(source: str, run_id: str, dates: Dict[str, str]) -> None:
                         "time": plot.get("time"),
                         "temperature_k": plot.get("temperature_k"),
                     }
-            raw_params = m.get("parameters", {})
-            if isinstance(raw_params, dict):
-                # Reformat for the UI: flatten the value_k field and keep
-                # the probe provenance next to it.
-                for k, v in raw_params.items():
-                    if not isinstance(v, dict):
-                        continue
-                    parameters[k] = {
-                        "value_k": v.get("value_k"),
-                        "source": v.get("source"),
-                        "probe": v.get("probe"),
-                        "time": v.get("time"),
-                    }
         except Exception:
             pass
     payload: Dict[str, Any] = {
@@ -391,8 +370,6 @@ def _write_latest(source: str, run_id: str, dates: Dict[str, str]) -> None:
     }
     if actual_temps:
         payload["actual_temperatures"] = actual_temps
-    if parameters:
-        payload["parameters"] = parameters
     # Flag whether any heatmap (``_2d.npz``) files exist in the current
     # source tree. The frontend uses this to disable the "Include 2D
     # heatmaps" checkbox on the save form when there's nothing to include.

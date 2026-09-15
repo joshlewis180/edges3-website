@@ -67,16 +67,6 @@ export default function LatestRunBanner({ pageTitle }: BannerProps) {
     })
     .filter((line): line is string => Boolean(line))
 
-  const params = latest.parameters ?? {}
-  const paramLines = ["tcold", "thot", "tcab", "tload", "tns"]
-    .map((name) => {
-      const p = params[name]
-      if (!p || typeof p.value_k !== "number") return null
-      const probeStr = p.source === "probe" && p.probe != null ? `probe ${p.probe}` : "default"
-      return `${name} = ${p.value_k.toFixed(2)} K  (${probeStr})`
-    })
-    .filter((line): line is string => Boolean(line))
-
   async function handleSave() {
     setSaving(true)
     setMessage(null)
@@ -129,17 +119,6 @@ export default function LatestRunBanner({ pageTitle }: BannerProps) {
           </div>
           <ul className="mb-0 ps-3">
             {tempLines.map((line) => (
-              <li key={line}>{line}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {paramLines.length > 0 && (
-        <div className="small">
-          <div className="text-muted">Calibration parameters used by the analysis:</div>
-          <ul className="mb-0 ps-3">
-            {paramLines.map((line) => (
               <li key={line}>{line}</li>
             ))}
           </ul>

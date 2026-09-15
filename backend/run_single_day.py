@@ -71,11 +71,6 @@ import edges.modeling as mdl  # noqa: E402
 # ---------------------------------------------------------------------------
 DEFAULT_CTERMS = 6
 DEFAULT_WTERMS = 5
-DEFAULT_TCOLD = 306.5
-DEFAULT_THOT = 393.22
-DEFAULT_TCAB = 306.5
-DEFAULT_TLOAD = 300.0
-DEFAULT_TNS = 1000.0
 DEFAULT_FSTART = 50.0
 DEFAULT_FSTOP = 190.0
 DEFAULT_WFSTART = 50.0
@@ -86,11 +81,10 @@ CAL_LOADS = ("amb", "hot", "open", "short")
 # ---------------------------------------------------------------------------
 # Calibration temperature derivation
 # ---------------------------------------------------------------------------
-# Each calibration parameter (``tcold``/``thot``/``tcab``/``tload``/``tns``)
-# is auto-derived from the temperature log when one is available. The
-# defaults below are used as fallbacks when the log is missing or the
-# requested probe has no data at the calibration time. Probe numbers are
-# the ``offset_s`` values in the on-site temperature log file.
+# All calibration temperatures are auto-derived from the temperature log.
+# Probe numbers are the ``offset_s`` values in the on-site temperature
+# log file. There are no user-tunable setpoints anymore — whatever the
+# probe says is what the analysis uses.
 PROBE_AMBIENT = 100.0       # ambient sensor (used for ambient + LNA cals)
 PROBE_HOT = 102.0           # hot load sensor
 PROBE_LNA = 100.0           # LNA / cable temp (same physical probe)
@@ -102,7 +96,7 @@ def compute_calibration_temps(
     blocks: List[Dict[str, Any]],
     obs_time: Optional[datetime] = None,
 ) -> Dict[str, Dict[str, Any]]:
-    """Derive ``tcold``/``thot``/``tcab`` from probe readings.
+    """Derive the per-load calibration temperatures from probe readings.
 
     Returns a dict keyed by ``"ambient"``, ``"hot"``, ``"lna"``. Each
     value is a dict with ``temperature_k``, ``temperature_c``,
@@ -115,10 +109,10 @@ def compute_calibration_temps(
     default.
     """
     from config import (
-        TCOLD_DEFAULT, THOT_DEFAULT, TCAB_DEFAULT,
+        TCOLD_FALLBACK_K, THOT_FALLBACK_K, TCAB_FALLBACK_K,
         PROBE_AMBIENT, PROBE_HOT, PROBE_LNA,
     )
-    defaults = {"ambient": TCOLD_DEFAULT, "hot": THOT_DEFAULT, "lna": TCAB_DEFAULT}
+    defaults = {"ambient": TCOLD_FALLBACK_K, "hot": THOT_FALLBACK_K, "lna": TCAB_FALLBACK_K}
     cal_keys = {"ambient": "amb", "hot": "hot", "lna": "lna"}
     probes = {"ambient": PROBE_AMBIENT, "hot": PROBE_HOT, "lna": PROBE_LNA}
 
@@ -388,14 +382,24 @@ def run_receiver_calibration(
     outdir: Path,
     cterms: int,
     wterms: int,
-    tcold: float,
-    thot: float,
-    tcab: float,
+    ambient_temp_k: float,
+    hot_temp_k: float,
+    cable_temp_k: float,
     fstart: float,
     fstop: float,
     wfstart: float,
     wfstop: float,
 ) -> Tuple[Path, Path]:
+    """Run the EDGES receiver calibration.
+
+    ``ambient_temp_k`` / ``hot_temp_k`` / ``cable_temp_k`` are the
+    PROBE-MEASURED temperatures of the ambient load, hot load, and LNA
+    cable at the time of each calibration. EDGES uses these as the
+    *known* reference temperatures in the noise-wave fit; whatever we
+    pass becomes the value reported in ``calibrated_temps.txt``. So we
+    must pass the actual probe readings (not hardcoded setpoints) to
+    keep the noise-wave model honest.
+    """
     year, day = parse_yyyy_ddd(cal_date)
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -424,9 +428,9 @@ def run_receiver_calibration(
                 wfstart=wfstart,
                 wfstop=wfstop,
                 Lh=-1,
-                thot=thot,
-                tcold=tcold,
-                tcab=tcab,
+                thot=hot_temp_k,
+                tcold=ambient_temp_k,
+                tcab=cable_temp_k,
                 cfit=cterms,
                 wfit=wterms,
                 nfit2=27,
@@ -551,11 +555,6 @@ def process_single_day(
     *,
     cterms: int = DEFAULT_CTERMS,
     wterms: int = DEFAULT_WTERMS,
-    tcold: float = DEFAULT_TCOLD,
-    thot: float = DEFAULT_THOT,
-    tcab: float = DEFAULT_TCAB,
-    tload: float = DEFAULT_TLOAD,
-    tns: float = DEFAULT_TNS,
     fstart: float = DEFAULT_FSTART,
     fstop: float = DEFAULT_FSTOP,
     wfstart: float = DEFAULT_WFSTART,
@@ -581,11 +580,10 @@ def process_single_day(
 
     # ---- 0. Calibration temperature derivation ------------------------------
     # Load the calibration .acq and the temperature log up front so we can
-    # auto-derive ``tload``/``tns`` (the noise-wave calibration references)
-    # from probe readings. The ``tcold``/``thot``/``tcab`` values that get
-    # written to ``calibration_temperatures/*.npz`` stay as the configured
-    # SETPOINTS — that's what the comparison plot is supposed to contrast
-    # against the probe-measured actual readings.
+    # derive the per-load calibration temperatures from probe readings.
+    # These probe readings are passed straight to the EDGES receiver
+    # calibration, so ``calibrated_temps.txt`` will reflect the actual
+    # physical temperatures rather than echoing back hardcoded setpoints.
     print(f"[run] Loading calibration .acq + temperature log from "
           f"{config.TEMPERATURE_LOG_DIR} ...")
     cal_data = read_calibration_acq(raw_root, cal_date)
@@ -608,28 +606,39 @@ def process_single_day(
         print(f"[run] WARN: temperature log directory missing ({config.TEMPERATURE_LOG_DIR})")
     print_probe_survey(blocks)
     cal_temps = compute_calibration_temps(cal_data, blocks, obs_time=obs_time)
-    # ``tload`` is the hot-load reference (used by Dicke / noise-wave);
-    # ``tns`` is the cable / noise-source temperature. Both come from the
-    # probe log if available, otherwise fall back to the defaults.
-    tload = cal_temps["hot"]["temperature_k"]
-    tns = cal_temps["lna"]["temperature_k"]
-    # ``tcold``/``thot``/``tcab`` stay as the configured setpoints (the
-    # ``*_DEFAULT`` values). The ``calibration_temperatures/*.npz`` files
-    # store exactly those setpoints so the comparison plot shows setpoint
-    # vs measured-probe.
-    print(f"[run] setpoints for comparison plot: "
-          f"tcold={tcold:.2f} K  thot={thot:.2f} K  tcab={tcab:.2f} K")
-    print(f"[run] analysis params (from probes): "
-          f"tload={tload:.2f} K  tns={tns:.2f} K")
+    # All calibration temperatures come from probe readings. The probe
+    # at the ambient cal time is the *ambient* temperature (which is
+    # also a good proxy for the cable temperature since the cable sits
+    # at ambient); the probe at the hot cal time is the *hot load*
+    # temperature; the probe at the LNA obs time is what we use for
+    # ``tns`` (cable / noise source).
+    ambient_k = cal_temps["ambient"]["temperature_k"]
+    hot_k = cal_temps["hot"]["temperature_k"]
+    lna_k = cal_temps["lna"]["temperature_k"]
+    print(f"[run] probe-derived calibration temperatures: "
+          f"ambient={ambient_k:.2f} K  hot={hot_k:.2f} K  lna/cable={lna_k:.2f} K")
 
     # ---- 1. Receiver calibration --------------------------------------------
+    # The EDGES noise-wave fit needs the *known* load temperatures.
+    # Whatever we pass here becomes the value reported back in
+    # ``calibrated_temps.txt``. We pass the probe readings so the fit
+    # converges on the actual physical temperatures rather than echoing
+    # back hardcoded setpoints.
     print("[run] Receiver calibration ...")
     calib_dir = run_dir / "calibration"
     specal_file, s11_modelled_file = run_receiver_calibration(
         raw_root, cal_date, s11_date, calib_dir,
-        cterms, wterms, tcold, thot, tcab,
-        fstart, fstop, wfstart, wfstop,
+        cterms, wterms,
+        ambient_temp_k=ambient_k,
+        hot_temp_k=hot_k,
+        cable_temp_k=ambient_k,   # cable sits in ambient
+        fstart=fstart, fstop=fstop, wfstart=wfstart, wfstop=wfstop,
     )
+    # ``tload`` (hot-load reference for Dicke switching) and ``tns``
+    # (cable / noise source temperature) are derived from the same
+    # probe readings.
+    tload = hot_k
+    tns = lna_k
     calobs = read_specal(specal_file, t_load=tload, t_load_ns=tns)
 
     # ---- 2. Antenna data ----------------------------------------------------
@@ -803,9 +812,9 @@ def process_single_day(
             data_freqs_mhz, np.full_like(data_freqs_mhz, fallback_k),
         )
 
-    _save_cal_temp("ambient", "ambient", tcold)
-    _save_cal_temp("hot",     "hot",     thot)
-    _save_cal_temp("lna",     "lna",     tcab)
+    _save_cal_temp("ambient", "ambient", ambient_k)
+    _save_cal_temp("hot",     "hot",     hot_k)
+    _save_cal_temp("lna",     "lna",     lna_k)
     _save_cal_temp("open",    "open",    np.nan)
     _save_cal_temp("short",   "short",   np.nan)
 
@@ -870,7 +879,7 @@ def process_single_day(
     else:
         print("[run] WARN: obs_time unavailable or no blocks parsed")
     # The temperature log records Celsius. Convert to Kelvin so it matches
-    # the pipeline parameters (tcold, thot, tcab), which are already in K.
+    # the rest of the analysis (calibration temperatures, EDGES fit output).
     actual_temp_k = actual_temp_c + 273.15 if np.isfinite(actual_temp_c) else np.nan
     obs_time_iso = obs_time.isoformat() if obs_time is not None else None
     _save_freq_y(
@@ -1062,15 +1071,6 @@ def process_single_day(
         source=source,
         plots=plots,
         dates=dates,
-        parameters={
-            # Setpoints (what the calibration_temperatures/*.npz files hold)
-            "tcold":   {"value_k": tcold,   "source": "setpoint"},
-            "thot":    {"value_k": thot,    "source": "setpoint"},
-            "tcab":    {"value_k": tcab,    "source": "setpoint"},
-            # Probe-derived values used by the analysis math
-            "tload":   {"value_k": tload,   "source": cal_temps["hot"]["source"],  "probe": cal_temps["hot"]["probe"],  "time": cal_temps["hot"]["time"]},
-            "tns":     {"value_k": tns,     "source": cal_temps["lna"]["source"],  "probe": cal_temps["lna"]["probe"],  "time": cal_temps["lna"]["time"]},
-        },
     )
     print(f"[run] Manifest written: {manifest_path}")
 
@@ -1079,8 +1079,7 @@ def process_single_day(
     # derived from the timestamps when the caller didn't pass one).
     params_for_hash = {
         "cterms": cterms, "wterms": wterms,
-        "tcold": tcold, "thot": thot, "tcab": tcab,
-        "tload": tload, "tns": tns,
+        "ambient_k": ambient_k, "hot_k": hot_k, "lna_k": lna_k,
         "fstart": fstart, "fstop": fstop,
         "wfstart": wfstart, "wfstop": wfstop,
         "save_2d_npz": bool(save_2d_npz),
@@ -1118,11 +1117,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--temperature_log", default=str(config.TEMPERATURE_LOG_FILE))
     p.add_argument("--cterms", type=int, default=DEFAULT_CTERMS)
     p.add_argument("--wterms", type=int, default=DEFAULT_WTERMS)
-    p.add_argument("--tcold", type=float, default=DEFAULT_TCOLD)
-    p.add_argument("--thot", type=float, default=DEFAULT_THOT)
-    p.add_argument("--tcab", type=float, default=DEFAULT_TCAB)
-    p.add_argument("--tload", type=float, default=DEFAULT_TLOAD)
-    p.add_argument("--tns", type=float, default=DEFAULT_TNS)
     p.add_argument("--fstart", type=float, default=DEFAULT_FSTART)
     p.add_argument("--fstop", type=float, default=DEFAULT_FSTOP)
     p.add_argument("--wfstart", type=float, default=DEFAULT_WFSTART)
@@ -1144,8 +1138,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         s11_date=args.s11_date,
         spec_date=args.spec_date,
         cterms=args.cterms, wterms=args.wterms,
-        tcold=args.tcold, thot=args.thot, tcab=args.tcab,
-        tload=args.tload, tns=args.tns,
         fstart=args.fstart, fstop=args.fstop,
         wfstart=args.wfstart, wfstop=args.wfstop,
         save_2d_npz=args.save_2d_npz,

@@ -151,35 +151,26 @@ DAEMON_ENABLED: bool = os.environ.get("EDGES_DAEMON_ENABLED", "0").lower() in (
 
 
 # ---------------------------------------------------------------------------
-# Calibration temperature parameters
+# Calibration temperature probes
 # ---------------------------------------------------------------------------
-# The pipeline uses five temperature parameters:
-#   tcold  cold load temperature during the ambient calibration (K)
-#   thot   hot load temperature during the hot calibration (K)
-#   tcab   cable / ambient temperature during the LNA calibration (K)
-#   tload  hot load temperature used as the reference in the Dicke /
-#          noise-wave calibration (K)  — usually equal to ``thot``
-#   tns    cable / noise-source temperature used in the noise-wave model (K)
-#          — usually equal to ``tcab``
-# When a temperature log is available, each parameter is auto-derived from
-# the appropriate probe at the matching calibration time. The values below
-# are the *fallback defaults* — they are used when no temperature log file
-# is reachable, or the requested probe has no data at that time.
-TCOLD_DEFAULT: float = float(os.environ.get("EDGES_TCOLD_DEFAULT", "306.5"))
-THOT_DEFAULT: float = float(os.environ.get("EDGES_THOT_DEFAULT", "393.22"))
-TCAB_DEFAULT: float = float(os.environ.get("EDGES_TCAB_DEFAULT", "306.5"))
-TLOAD_DEFAULT: float = float(os.environ.get("EDGES_TLOAD_DEFAULT", "393.22"))
-TNS_DEFAULT: float = float(os.environ.get("EDGES_TNS_DEFAULT", "306.5"))
-
-# Probe mapping: which temperature-log probe should be used to derive each
-# calibration parameter. Override with EDGES_PROBE_* if your hardware uses
-# a different sensor layout. The on-site temperature log contains multiple
-# probes per block; the numbers below are the ``offset_s`` values found in
-# the log file (see ``temperature_logger/*.log``).
+# The pipeline auto-derives every per-load calibration temperature from
+# the temperature log. There are no user-tunable setpoints anymore —
+# whatever the probe says is what the EDGES receiver calibration sees,
+# which in turn is what ``calibrated_temps.txt`` reports back.
+#
+# Probe numbers are the ``offset_s`` values found in the on-site
+# temperature log file (see ``temperature_logger/*.log``). Override with
+# EDGES_PROBE_* if your hardware uses a different sensor layout.
 PROBE_AMBIENT: float = float(os.environ.get("EDGES_PROBE_AMBIENT", "100"))
 PROBE_HOT: float = float(os.environ.get("EDGES_PROBE_HOT", "102"))
 PROBE_LNA: float = float(os.environ.get("EDGES_PROBE_LNA", "100"))
 PROBE_COLD_LOAD: float = float(os.environ.get("EDGES_PROBE_COLD_LOAD", "152"))
+
+# Fallback values used when no probe reading is found at the calibration
+# time. These are NOT exposed as env vars — they're internal constants.
+TCOLD_FALLBACK_K = 306.5
+THOT_FALLBACK_K = 393.22
+TCAB_FALLBACK_K = 306.5
 
 
 # ---------------------------------------------------------------------------
@@ -208,11 +199,9 @@ def describe() -> str:
         f"PYTHON             = {PYTHON}\n"
         f"DAEMON_HOUR        = {DAEMON_HOUR}\n"
         f"DAEMON_ENABLED     = {DAEMON_ENABLED}\n"
-        f"TCOLD_DEFAULT      = {TCOLD_DEFAULT} K\n"
-        f"THOT_DEFAULT       = {THOT_DEFAULT} K\n"
-        f"TCAB_DEFAULT       = {TCAB_DEFAULT} K\n"
-        f"TLOAD_DEFAULT      = {TLOAD_DEFAULT} K\n"
-        f"TNS_DEFAULT        = {TNS_DEFAULT} K\n"
+        f"TCOLD_FALLBACK_K   = {TCOLD_FALLBACK_K} K\n"
+        f"THOT_FALLBACK_K    = {THOT_FALLBACK_K} K\n"
+        f"TCAB_FALLBACK_K    = {TCAB_FALLBACK_K} K\n"
         f"PROBE_AMBIENT      = {PROBE_AMBIENT}\n"
         f"PROBE_HOT          = {PROBE_HOT}\n"
         f"PROBE_LNA          = {PROBE_LNA}\n"

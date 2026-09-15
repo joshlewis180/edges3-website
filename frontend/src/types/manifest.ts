@@ -78,26 +78,14 @@ export interface ActualTemperature {
   temperature_k: number | null
 }
 
-export interface CalParameter {
-  /** Temperature in Kelvin used by the analysis. */
-  value_k: number | null
-  /** ``"probe"`` if derived from the temperature log; ``"default"`` otherwise. */
-  source: string | null
-  /** Probe number used to derive the value (when ``source === "probe"``). */
-  probe: number | null
-  /** ISO-8601 timestamp of the calibration file used for the lookup. */
-  time?: string | null
-}
-
 export interface LatestRunInfo {
   source: PlotSource | null
   run_id: string | null
   dates: RunDates
   generated_at: string | null
-  /** Per-load actual temperatures (ambient/hot/lna) keyed by load name. */
+  /** Per-load actual temperatures (ambient/hot/lna) keyed by load name.
+   *  These come from the temperature log at the matching calibration time. */
   actual_temperatures?: Record<string, ActualTemperature>
-  /** Calibration parameters used by the analysis (tcold, thot, tcab, tload, tns). */
-  parameters?: Record<string, CalParameter>
   /** True if any ``_2d.npz`` heatmap files exist in the current source tree. */
   has_2d?: boolean
 }

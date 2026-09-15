@@ -36,7 +36,6 @@ const EMPTY_LATEST: LatestRunInfo = {
   dates: {},
   generated_at: null,
   actual_temperatures: {},
-  parameters: {},
   has_2d: false,
 }
 
@@ -60,7 +59,6 @@ export function RunProvider({ children }: { children: ReactNode }) {
         dates: data.dates ?? {},
         generated_at: data.generated_at ?? null,
         actual_temperatures: data.actual_temperatures ?? {},
-        parameters: data.parameters ?? {},
         has_2d: data.has_2d ?? false,
       })
     } catch {

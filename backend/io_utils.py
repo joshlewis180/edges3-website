@@ -230,7 +230,6 @@ def write_manifest(
     source: str,
     plots: List[Plot],
     dates: Dict[str, str],
-    parameters: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Write ``manifest.json`` and ``latest_run.json`` for one run.
 
@@ -238,11 +237,6 @@ def write_manifest(
     ``OUTPUT_ROOT/user``). The relative path stored in the manifest is
     ``<source-runs-dir>/<run_id>/...`` so the frontend can fetch via the
     static mount.
-
-    ``parameters`` is an optional dict (typically the derived
-    ``tcold``/``thot``/``tcab``/``tload``/``tns`` values plus their probe
-    provenance) that gets surfaced in the manifest so the UI can show
-    which temperatures were actually used by the analysis.
     """
     # The "latest run" symlink/path always points to runs/<run_id>/...
     rel_run = f"runs/{run_dir.name}"
@@ -270,8 +264,6 @@ def write_manifest(
         "generated_at": datetime.now().isoformat(),
         "plots": rendered,
     }
-    if parameters:
-        manifest["parameters"] = parameters
     out_manifest = output_root / "manifest.json"
     out_manifest.parent.mkdir(parents=True, exist_ok=True)
     with open(out_manifest, "w") as f:

@@ -80,15 +80,17 @@ time via Vite.
 | `EDGES_PYTHON` | current interpreter (`sys.executable`) | Python the daemon shells out to when running the pipeline |
 | `EDGES_DAEMON_HOUR` | `2` | Hour of day (0-23) at which the daily daemon fires |
 | `EDGES_DAEMON_ENABLED` | `0` | Set to `1` / `true` to start the in-process scheduler on backend startup |
-| `EDGES_TCOLD_DEFAULT` | `306.5` (K) | Fallback cold-load temperature when no probe reading is available |
-| `EDGES_THOT_DEFAULT` | `393.22` (K) | Fallback hot-load temperature |
-| `EDGES_TCAB_DEFAULT` | `306.5` (K) | Fallback cable / LNA calibration temperature |
-| `EDGES_TLOAD_DEFAULT` | `393.22` (K) | Fallback noise-wave `tload` (Dicke reference) |
-| `EDGES_TNS_DEFAULT` | `306.5` (K) | Fallback noise-wave `tns` (cable / noise source) |
 | `EDGES_PROBE_AMBIENT` | `100` | Temperature-log probe for ambient cal |
 | `EDGES_PROBE_HOT` | `102` | Temperature-log probe for hot cal |
 | `EDGES_PROBE_LNA` | `100` | Temperature-log probe for LNA cal |
 | `EDGES_PROBE_COLD_LOAD` | `152` | Temperature-log probe for the cold load (informational) |
+
+Calibration temperatures are now auto-derived from the temperature log at
+the matching calibration time and passed straight to the EDGES receiver
+calibration — there are no user-tunable `tcold` / `thot` / `tcab` /
+`tload` / `tns` setpoints anymore. If no probe reading is available at
+the calibration time the pipeline falls back to the internal constants
+(`306.5`, `393.22`, `306.5` K) and logs a warning.
 
 The values above are documented programmatically in
 `backend/config.py::describe()`. Run `python backend/config.py` to print
@@ -415,7 +417,7 @@ python run_single_day.py \
 ```
 
 Run with `--help` to see every tunable (cterms, wterms, fstart/fstop,
-tcold/thot/tcab/tload/tns, save_2d_npz, --run-hash, …).
+wfstart/wfstop, save_2d_npz, --run-hash, …).
 
 ### Triggering the pipeline from the UI
 
