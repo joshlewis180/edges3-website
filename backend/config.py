@@ -10,8 +10,13 @@ Environment variables (all optional, with sensible defaults for local dev):
   EDGES_OUTPUT_ROOT         Where outputs and the manifest live
   EDGES_TEMP_LOG_FILE       Path to a specific temperature.log (legacy)
   EDGES_TEMP_LOG_DIR        Directory containing one or more temperature log files;
-                             every ``*.log`` in this directory is read. Defaults
-                             to the parent directory of ``EDGES_TEMP_LOG_FILE``.
+                             every ``*.log`` (plus ``*.backup`` and ``*.txt``)
+                             in this directory is read. Defaults to the parent
+                             directory of ``EDGES_TEMP_LOG_FILE``.
+  EDGES_BEAM_FACTOR_FILE    Path to the EDGES-3 antenna beam factor file
+                             (``e3_beam_factor.hickle``). Required for the
+                             absolute temperature calibration; location
+                             differs between local dev and the SSH cluster.
   EDGES_PYTHON              Python interpreter to use (default: current 'python')
   EDGES_DAEMON_HOUR         Hour of day (0-23) to run the daily daemon (default: 2)
   EDGES_DAEMON_ENABLED      "1"/"true" to enable the in-process scheduler
@@ -77,6 +82,51 @@ TEMPERATURE_LOG_DIR: Path = Path(
         "EDGES_TEMP_LOG_DIR",
         str(TEMPERATURE_LOG_FILE.parent),
     )
+).expanduser().resolve()
+
+
+# ---------------------------------------------------------------------------
+# Beam factor file
+# ---------------------------------------------------------------------------
+# The EDGES-3 antenna beam factor lives in a single ``.hickle`` file that
+# is read by the absolute calibration. The on-disk location differs
+# between local mac dev and the SSH cluster, so it is env-driven. We
+# default to a sibling of RAW_DATA_ROOT's parent (the `edges/` directory)
+# and fall back to common cluster locations.
+def _default_beam_factor_file() -> Path:
+    """Pick a sensible default for whichever machine we are on.
+
+    The beam factor lives in the ``edges/`` directory that is the
+    great-grandparent of ``temperature.log``
+    (``data5/edges/data/EDGES3_data/MRO/temperature_logger/temperature.log``
+    → great-grandparent is ``data5/edges/``). Tries, in order:
+
+      1. Great-grandparent of the live ``temperature.log``
+      2. The cluster mount point
+      3. Linux dev mounts
+      4. ``$HOME/edges/...``
+    """
+    # 1. walk up 4 levels from temperature.log:  log → temperature_logger/ → MRO/ → EDGES3_data/ → data/ → edges/
+    sibling = TEMPERATURE_LOG_FILE.parents[4] / "e3_beam_factor.hickle"
+    if sibling.exists():
+        return sibling
+    # 2. enterprise cluster
+    cluster = Path("/data5/edges/e3_beam_factor.hickle")
+    if cluster.exists():
+        return cluster
+    # 3. linux dev mounts
+    for guess in (
+        Path("/mnt/data5/edges/e3_beam_factor.hickle"),
+        Path("/scratch/edges/e3_beam_factor.hickle"),
+        Path.home() / "edges" / "e3_beam_factor.hickle",
+    ):
+        if guess.exists():
+            return guess
+    return sibling  # may not exist; downstream code will report a clear error
+
+
+BEAM_FACTOR_FILE: Path = Path(
+    os.environ.get("EDGES_BEAM_FACTOR_FILE", str(_default_beam_factor_file()))
 ).expanduser().resolve()
 
 
@@ -192,6 +242,7 @@ def describe() -> str:
         f"RAW_DATA_ROOT      = {RAW_DATA_ROOT}\n"
         f"TEMPERATURE_LOG_DIR= {TEMPERATURE_LOG_DIR}\n"
         f"TEMPERATURE_LOG    = {TEMPERATURE_LOG_FILE}\n"
+        f"BEAM_FACTOR_FILE   = {BEAM_FACTOR_FILE}\n"
         f"OUTPUT_ROOT        = {OUTPUT_ROOT}\n"
         f"DAEMON_DIR         = {DAEMON_DIR}\n"
         f"USER_DIR           = {USER_DIR}\n"

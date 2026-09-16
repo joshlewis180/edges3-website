@@ -76,7 +76,8 @@ time via Vite.
 | `EDGES_RAW_DATA_ROOT` | `/Users/joshualewis/EdgesTestData/data5/edges/data/EDGES3_data/MRO` (local) or `/data5/edges/data/EDGES3_data/MRO` (cluster) | Root of the raw `.acq` + `.log` tree the pipeline reads |
 | `EDGES_OUTPUT_ROOT` | `/Users/joshualewis/EdgesTestData/outputs` (local) or `/data5/edges/edges_outputs` (cluster) | Where the manifest, daemon/user trees, saved zips, and run history are written |
 | `EDGES_TEMP_LOG_FILE` | `$EDGES_RAW_DATA_ROOT/temperature_logger/temperature.log` | Single-file temperature log (legacy) |
-| `EDGES_TEMP_LOG_DIR` | `$EDGES_TEMP_LOG_FILE`'s parent | Directory of `*.log` files; every file in here is read by the temperature lookup |
+| `EDGES_TEMP_LOG_DIR` | `$EDGES_TEMP_LOG_FILE`'s parent | Directory of log files; every `*.log`, `*.backup`, and `*.txt` in here is read and merged into one timeline |
+| `EDGES_BEAM_FACTOR_FILE` | `$EDGES_RAW_DATA_ROOT/../../e3_beam_factor.hickle` (i.e. `data5/edges/e3_beam_factor.hickle`) | Path to the EDGES-3 antenna beam factor file. Required for the absolute temperature calibration; location differs between local dev and the SSH cluster, so set it explicitly there |
 | `EDGES_PYTHON` | current interpreter (`sys.executable`) | Python the daemon shells out to when running the pipeline |
 | `EDGES_DAEMON_HOUR` | `2` | Hour of day (0-23) at which the daily daemon fires |
 | `EDGES_DAEMON_ENABLED` | `0` | Set to `1` / `true` to start the in-process scheduler on backend startup |

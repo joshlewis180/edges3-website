@@ -18,6 +18,7 @@ set -euo pipefail
 : "${EDGES_RAW_DATA_ROOT:=/data5/edges/data/EDGES3_data/MRO}"
 : "${EDGES_OUTPUT_ROOT:=/data5/edges/edges_outputs}"
 : "${EDGES_TEMP_LOG_DIR:=/data5/edges/data/EDGES3_data/MRO/temperature_logger}"
+: "${EDGES_BEAM_FACTOR_FILE:=/data5/edges/e3_beam_factor.hickle}"
 : "${EDGES_DAEMON_ENABLED:=0}"
 
 if [[ -f /etc/default/edges-pipeline ]]; then
@@ -26,7 +27,7 @@ if [[ -f /etc/default/edges-pipeline ]]; then
 fi
 
 export EDGES_RAW_DATA_ROOT EDGES_OUTPUT_ROOT EDGES_TEMP_LOG_DIR \
-       EDGES_DAEMON_ENABLED
+       EDGES_BEAM_FACTOR_FILE EDGES_DAEMON_ENABLED
 
 # Make the conda env's Python the explicit one so the unit file's
 # ExecStart is the same as this script's.

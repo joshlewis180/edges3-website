@@ -91,22 +91,136 @@ PROBE_LNA = 100.0           # LNA / cable temp (same physical probe)
 PROBE_COLD_LOAD = 152.0     # cold load sensor (informational)
 
 
+def _probe_key(probe: float) -> str:
+    """String key for a probe number as it appears in ``.tmp`` files.
+
+    The on-site logger writes probe offsets as integers (``100``, ``102``,
+    ``152``) even when our config stores them as floats.
+    """
+    if probe == int(probe):
+        return str(int(probe))
+    return str(probe)
+
+
+def read_temperature_snapshot(snapshot_path: Path) -> Optional[Dict[str, float]]:
+    """Read a ``.tmp`` temperature snapshot file written by the on-site logger.
+
+    Filename convention: ``<cal_date>_<HH>_<load>.tmp`` — written at the
+    moment of every calibration / observation, containing the exact
+    probe readings at that moment. Each non-empty line is
+    ``<probe_offset> <temperature_celsius>``.
+
+    Returns a dict of ``probe_offset_str → temperature_celsius``, or
+    ``None`` if the snapshot file doesn't exist. Reads in binary mode
+    with ``errors="replace"`` to tolerate any stray non-UTF-8 bytes.
+    """
+    if not snapshot_path.exists():
+        return None
+    readings: Dict[str, float] = {}
+    with open(snapshot_path, "rb") as f:
+        for raw in f:
+            try:
+                line = raw.decode("utf-8", errors="replace").strip()
+            except Exception:
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                try:
+                    readings[parts[0]] = float(parts[1])
+                except ValueError:
+                    pass
+    return readings
+
+
+def _lookup_probe_temp_with_fallback(
+    *,
+    mro_root: Optional[Path],
+    snapshot_cal_date: Optional[str],
+    snapshot_hour: Optional[int],
+    snapshot_load: Optional[str],
+    blocks: List[Dict[str, Any]],
+    target_time: Optional[datetime],
+    probe: float,
+    label: str,
+) -> Tuple[Optional[float], str]:
+    """Look up a probe temperature, preferring ``.tmp`` snapshot, then log.
+
+    Returns ``(temperature_celsius, source)`` where ``source`` is one
+    of ``"snapshot"`` (exact cal-moment), ``"probe"`` (log nearest-in-
+    time fallback) or ``"default"`` (no reading found, ``temperature``
+    is ``None``).
+    """
+    # 1. Primary: try the .tmp snapshot file (exact cal-moment match).
+    if (
+        mro_root is not None
+        and snapshot_cal_date is not None
+        and snapshot_hour is not None
+        and snapshot_load is not None
+    ):
+        snapshot_path = (
+            mro_root / f"{snapshot_cal_date}_{snapshot_hour:02d}_{snapshot_load}.tmp"
+        )
+        readings = read_temperature_snapshot(snapshot_path)
+        if readings is not None:
+            probe_key = _probe_key(probe)
+            if probe_key in readings:
+                t_c = float(readings[probe_key])
+                print(
+                    f"[run] actual temp {label}: {t_c:.2f}°C "
+                    f"(from .tmp snapshot {snapshot_path.name})"
+                )
+                return t_c, "snapshot"
+            print(
+                f"[run] actual temp {label}: snapshot {snapshot_path.name} "
+                f"exists but probe {probe} not in it; falling back to log"
+            )
+
+    # 2. Fallback: nearest-in-time lookup in the merged temperature log.
+    if blocks and target_time is not None:
+        t_c = get_temperature_at_time(blocks, target_time, probe=probe)
+        if t_c is not None:
+            t_c = float(t_c)
+            print(
+                f"[run] actual temp {label}: {t_c:.2f}°C "
+                f"(from probe {probe} at {target_time.isoformat()})"
+                if snapshot_cal_date is None
+                else f"[run] actual temp {label}: {t_c:.2f}°C "
+                f"(from probe {probe} at {target_time.isoformat()} — no snapshot)"
+            )
+            return t_c, "probe"
+
+    print(f"[run] WARN: no temperature for {label} (probe {probe}) at {target_time}")
+    return None, "default"
+
+
 def compute_calibration_temps(
     cal_data: Dict[str, Any],
     blocks: List[Dict[str, Any]],
     obs_time: Optional[datetime] = None,
+    *,
+    mro_root: Optional[Path] = None,
+    cal_date: Optional[str] = None,
+    spec_date: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Derive the per-load calibration temperatures from probe readings.
 
     Returns a dict keyed by ``"ambient"``, ``"hot"``, ``"lna"``. Each
     value is a dict with ``temperature_k``, ``temperature_c``,
-    ``probe``, ``time`` and ``source`` (``"probe"`` or ``"default"``).
-    Falls back to the configured defaults if no probe reading is found.
+    ``probe``, ``time`` and ``source`` (``"snapshot"``, ``"probe"`` or
+    ``"default"``). Falls back to the configured defaults if no probe
+    reading is found.
 
     For ``lna`` there is no separate calibration file — the LNA cal
     happens at the raw observation time. If ``obs_time`` is supplied we
     use it as the LNA lookup timestamp; otherwise we fall back to the
     default.
+
+    Primary source: the ``<cal_date>_<HH>_<load>.tmp`` snapshot file
+    written by the on-site logger at the moment of every calibration /
+    observation. This is an exact match (no nearest-in-time error, no
+    cross-day lookup). If the snapshot is missing, or it doesn't
+    contain the requested probe, we fall back to the nearest-in-time
+    reading in the merged ``temperature.log``/``.backup`` blocks.
     """
     from config import (
         TCOLD_FALLBACK_K, THOT_FALLBACK_K, TCAB_FALLBACK_K,
@@ -115,6 +229,9 @@ def compute_calibration_temps(
     defaults = {"ambient": TCOLD_FALLBACK_K, "hot": THOT_FALLBACK_K, "lna": TCAB_FALLBACK_K}
     cal_keys = {"ambient": "amb", "hot": "hot", "lna": "lna"}
     probes = {"ambient": PROBE_AMBIENT, "hot": PROBE_HOT, "lna": PROBE_LNA}
+    # Snapshot filename suffix for each display key. ``lna`` reuses the
+    # antenna observation snapshot because there is no separate LNA cal.
+    snapshot_loads = {"ambient": "amb", "hot": "hot", "lna": "ant"}
 
     result: Dict[str, Dict[str, Any]] = {}
     for display, cal_key in cal_keys.items():
@@ -127,15 +244,61 @@ def compute_calibration_temps(
             "time": None,
             "source": "default",
         }
-        # Pick the timestamp we look up against. LNA has no cal file, so
-        # use the observation time when available.
+
+        # Resolve the cal_date + hour for the .tmp snapshot lookup.
+        snapshot_cal_date: Optional[str] = None
+        snapshot_hour: Optional[int] = None
         lookup_time: Optional[datetime] = None
-        if cal_key in cal_data:
+        if display == "lna" and spec_date is not None:
+            parts = spec_date.split("_")
+            if len(parts) >= 3:
+                snapshot_cal_date = f"{parts[0]}_{parts[1]}"
+                try:
+                    snapshot_hour = int(parts[2])
+                except ValueError:
+                    snapshot_hour = None
+            lookup_time = obs_time
+        elif cal_key in cal_data:
             try:
                 lookup_time = cal_data[cal_key].times[0, 0].to_datetime()
             except Exception:
                 lookup_time = None
-        elif display == "lna" and obs_time is not None:
+            if cal_date is not None and lookup_time is not None:
+                snapshot_cal_date = cal_date
+                snapshot_hour = lookup_time.hour
+
+        # 1. Primary: try the .tmp snapshot file (exact cal-moment match).
+        if (
+            mro_root is not None
+            and snapshot_cal_date is not None
+            and snapshot_hour is not None
+        ):
+            snapshot_path = (
+                mro_root
+                / f"{snapshot_cal_date}_{snapshot_hour:02d}_{snapshot_loads[display]}.tmp"
+            )
+            readings = read_temperature_snapshot(snapshot_path)
+            if readings is not None:
+                probe_key = _probe_key(probe)
+                if probe_key in readings:
+                    t_c = readings[probe_key]
+                    entry["temperature_c"] = float(t_c)
+                    entry["temperature_k"] = float(t_c) + 273.15
+                    entry["time"] = lookup_time.isoformat() if lookup_time else None
+                    entry["source"] = "snapshot"
+                    print(
+                        f"[run] cal temp {display}: {entry['temperature_k']:.2f} K "
+                        f"(from .tmp snapshot {snapshot_path.name})"
+                    )
+                    result[display] = entry
+                    continue
+                print(
+                    f"[run] cal temp {display}: snapshot {snapshot_path.name} "
+                    f"exists but probe {probe} not in it; falling back to log"
+                )
+
+        # 2. Fallback: nearest-in-time lookup in the merged temperature log.
+        if display == "lna" and obs_time is not None and lookup_time is None:
             lookup_time = obs_time
         if not blocks or lookup_time is None:
             print(
@@ -205,17 +368,28 @@ def generate_run_id(params: Dict[str, Any]) -> str:
 # Temperature log parsing
 # ---------------------------------------------------------------------------
 def parse_temperature_log_dir(log_dir: Path) -> List[Dict[str, Any]]:
-    """Load every ``*.log`` file in ``log_dir`` and return their merged blocks.
+    """Load every temperature-log file in ``log_dir`` and return merged blocks.
 
-    The on-site logger writes a new file every so often (per session,
-    per day, or per sensor). We treat them all as a single timeline so the
+    Recognised extensions (sorted, deduplicated, merged into one timeline):
+
+      * ``*.log``     — the live on-site log
+      * ``*.backup``  — rotation snapshots (e.g. ``temperature.log-Aug12-Aug18-2026.backup``)
+      * ``*.txt``     — ad-hoc dumps from the logger
+
+    The on-site logger rotates files every so often; the ``.backup`` files
+    contain the *earlier* portion of the history that has scrolled out of
+    the live ``.log``. We treat them all as a single timeline so the
     nearest-in-time lookup sees the full history regardless of which file
     a particular reading lives in.
     """
     merged: List[Dict[str, Any]] = []
     if not log_dir.exists():
         return merged
-    paths = sorted(log_dir.glob("*.log"))
+    paths = sorted(set(
+        list(log_dir.glob("*.log"))
+        + list(log_dir.glob("*.backup"))
+        + list(log_dir.glob("*.txt"))
+    ))
     if not paths:
         # Fall back to a single explicit file in case the directory layout
         # differs (e.g. the user is still pointing at a specific file).
@@ -229,15 +403,25 @@ def parse_temperature_log_dir(log_dir: Path) -> List[Dict[str, Any]]:
 
 
 def parse_temperature_log(log_path: Path) -> List[Dict[str, Any]]:
-    """Parse the on-site thermostat log into a list of measurement blocks."""
+    """Parse the on-site thermostat log into a list of measurement blocks.
+
+    Reads the file in binary mode and decodes each line with
+    ``errors="replace"`` so that binary noise in some ``.backup`` files
+    (the on-site logger occasionally writes a small binary header) doesn't
+    kill the whole parse. Bad bytes are replaced with ``?`` and the
+    regex/skip logic naturally drops the resulting garbage lines.
+    """
     blocks: List[Dict[str, Any]] = []
     if not log_path.exists():
         return blocks
 
     current: Optional[Dict[str, Any]] = None
-    with open(log_path, "r") as f:
-        for line in f:
-            line = line.strip()
+    with open(log_path, "rb") as f:
+        for raw in f:
+            try:
+                line = raw.decode("utf-8", errors="replace").strip()
+            except Exception:
+                continue
             if not line:
                 continue
             if re.match(r"^\d{4}_\d{3}_\d+$", line):
@@ -605,7 +789,14 @@ def process_single_day(
     else:
         print(f"[run] WARN: temperature log directory missing ({config.TEMPERATURE_LOG_DIR})")
     print_probe_survey(blocks)
-    cal_temps = compute_calibration_temps(cal_data, blocks, obs_time=obs_time)
+    cal_temps = compute_calibration_temps(
+        cal_data,
+        blocks,
+        obs_time=obs_time,
+        mro_root=raw_root,
+        cal_date=cal_date,
+        spec_date=spec_date,
+    )
     # All calibration temperatures come from probe readings. The probe
     # at the ambient cal time is the *ambient* temperature (which is
     # also a good proxy for the cable temperature since the cable sits
@@ -862,25 +1053,47 @@ def process_single_day(
     )
 
     # ---- 11. Actual temperature -------------------------------------------
+    # Step 11 is the "noise-wave fit vs actual probe" comparison. The
+    # actual probe temperature must come from the same source as the
+    # calibration temperatures in step 0 so the two sides of the plot
+    # agree: first try the ``.tmp`` snapshot taken at the cal/obs
+    # moment, then fall back to the nearest-in-time log block. Probes
+    # come from ``config.PROBE_*`` (so ``EDGES_PROBE_LNA=150`` etc. are
+    # honoured here too).
     actual_temp_dir = run_dir / "actual_temperature"
     actual_temp_dir.mkdir(parents=True, exist_ok=True)
-    actual_temp_c = np.nan  # Celsius, from the temperature log
+    actual_temp_c = np.nan
     try:
         obs_time = raw_data.times[0, 0].to_datetime()
     except Exception:
         obs_time = None
-    # ``blocks`` was already loaded in step 0; just look up the probe now.
-    if obs_time is not None and blocks:
-        t = get_temperature_at_time(blocks, obs_time)
-        if t is not None:
-            actual_temp_c = t
-        else:
-            print("[run] WARN: temperature not found for observation time")
-    else:
-        print("[run] WARN: obs_time unavailable or no blocks parsed")
+    obs_snapshot_cal_date: Optional[str] = None
+    obs_snapshot_hour: Optional[int] = None
+    if spec_date is not None:
+        parts = spec_date.split("_")
+        if len(parts) >= 3:
+            obs_snapshot_cal_date = f"{parts[0]}_{parts[1]}"
+            try:
+                obs_snapshot_hour = int(parts[2])
+            except ValueError:
+                obs_snapshot_hour = None
+    actual_temp_c, actual_source = _lookup_probe_temp_with_fallback(
+        mro_root=raw_root,
+        snapshot_cal_date=obs_snapshot_cal_date,
+        snapshot_hour=obs_snapshot_hour,
+        snapshot_load="ant",
+        blocks=blocks,
+        target_time=obs_time,
+        probe=config.PROBE_AMBIENT,
+        label="obs-time",
+    )
     # The temperature log records Celsius. Convert to Kelvin so it matches
     # the rest of the analysis (calibration temperatures, EDGES fit output).
-    actual_temp_k = actual_temp_c + 273.15 if np.isfinite(actual_temp_c) else np.nan
+    actual_temp_k = (
+        actual_temp_c + 273.15
+        if actual_temp_c is not None and np.isfinite(actual_temp_c)
+        else np.nan
+    )
     obs_time_iso = obs_time.isoformat() if obs_time is not None else None
     _save_freq_y(
         actual_temp_dir, f"{spec_date}_actual_temp.npz",
@@ -888,47 +1101,69 @@ def process_single_day(
         metadata={
             "time": obs_time_iso,
             "temperature_k": float(actual_temp_k) if np.isfinite(actual_temp_k) else None,
-            "temperature_c": float(actual_temp_c) if np.isfinite(actual_temp_c) else None,
+            "temperature_c": float(actual_temp_c) if actual_temp_c is not None and np.isfinite(actual_temp_c) else None,
+            "source": actual_source,
         },
     )
-    print(f"[run] actual temperature (raw obs @ {obs_time_iso}): {actual_temp_c:.2f}°C  =  {actual_temp_k:.2f} K")
 
     # ---- 11b. Per-load actual temperature (matched by timestamp) ----------
     # For each calibration measurement we save a separate npz whose y is
     # the actual temperature at the moment THAT calibration was taken.
     # That way the "ambient vs actual", "hot vs actual" and "LNA vs
     # actual" plots line up correctly in time.
-    PER_LOAD_CALIBRATION = {
-        "ambient": ("amb", 100.0),    # ambient probe (~25 °C / 298 K)
-        "hot":     ("hot", 102.0),    # hot load probe (~110 °C / 383 K)
-        "lna":     (None, 100.0),     # ambient probe, raw obs time
-    }
+    #
+    # Each entry maps ``display_name → (cal_key, snapshot_load, probe)``:
+    #   * ``cal_key``      — the cal .acq dict key to read the timestamp from
+    #                         (``None`` for LNA, which uses ``obs_time``)
+    #   * ``snapshot_load`` — the ``.tmp`` filename suffix to try first
+    #   * ``probe``        — which probe number to look up, from config
+    PER_LOAD_CALIBRATION: List[Tuple[str, Optional[str], str, float]] = [
+        ("ambient", "amb",  "amb",  config.PROBE_AMBIENT),    # ambient cal @ cal_time, probe AMBIENT
+        ("hot",     "hot",  "hot",  config.PROBE_HOT),        # hot cal     @ cal_time, probe HOT
+        ("lna",     None,   "ant", config.PROBE_LNA),        # obs time    @ obs_time, probe LNA
+    ]
     per_load_meta: Dict[str, Dict[str, Any]] = {}
-    for display_name, (cal_key, probe) in PER_LOAD_CALIBRATION.items():
+    for display_name, cal_key, snapshot_load, probe in PER_LOAD_CALIBRATION:
         load_time: Optional[datetime] = None
+        load_snapshot_cal_date: Optional[str] = None
+        load_snapshot_hour: Optional[int] = None
         if cal_key is not None and cal_key in cal_data:
             try:
                 load_time = cal_data[cal_key].times[0, 0].to_datetime()
             except Exception:
                 load_time = None
+            if cal_date is not None and load_time is not None:
+                load_snapshot_cal_date = cal_date
+                load_snapshot_hour = load_time.hour
         else:
-            load_time = obs_time  # LNA falls back to raw obs time
-        load_actual_c = np.nan
-        if load_time is not None and blocks:
-            t = get_temperature_at_time(blocks, load_time, probe=probe)
-            if t is not None:
-                load_actual_c = t
-            else:
-                print(f"[run] WARN: no temperature for {display_name} (probe {probe}) at {load_time}")
-        else:
-            print(f"[run] WARN: missing timestamp or blocks for {display_name}")
-        load_actual_k = load_actual_c + 273.15 if np.isfinite(load_actual_c) else np.nan
+            # LNA: use obs time and the ant .tmp snapshot.
+            load_time = obs_time
+            load_snapshot_cal_date = obs_snapshot_cal_date
+            load_snapshot_hour = obs_snapshot_hour
+
+        load_actual_c, load_source = _lookup_probe_temp_with_fallback(
+            mro_root=raw_root,
+            snapshot_cal_date=load_snapshot_cal_date,
+            snapshot_hour=load_snapshot_hour,
+            snapshot_load=snapshot_load,
+            blocks=blocks,
+            target_time=load_time,
+            probe=probe,
+            label=display_name,
+        )
+        load_actual_k = (
+            load_actual_c + 273.15
+            if load_actual_c is not None and np.isfinite(load_actual_c)
+            else np.nan
+        )
         load_time_iso = load_time.isoformat() if load_time is not None else None
         # Cache for the manifest so the per-load multi plots can carry the
         # sampling time + temperature in their metadata.
         per_load_meta[display_name] = {
             "time": load_time_iso,
             "temperature_k": float(load_actual_k) if np.isfinite(load_actual_k) else None,
+            "probe": probe,
+            "source": load_source,
         }
         _save_freq_y(
             actual_temp_dir, f"{spec_date}_{display_name}_actual_temp.npz",
@@ -936,10 +1171,11 @@ def process_single_day(
             metadata={
                 "time": load_time_iso,
                 "temperature_k": float(load_actual_k) if np.isfinite(load_actual_k) else None,
-                "temperature_c": float(load_actual_c) if np.isfinite(load_actual_c) else None,
+                "temperature_c": float(load_actual_c) if load_actual_c is not None and np.isfinite(load_actual_c) else None,
+                "probe": probe,
+                "source": load_source,
             },
         )
-        print(f"[run] actual temperature ({display_name} @ {load_time_iso}): {load_actual_c:.2f}°C  =  {load_actual_k:.2f} K")
 
     # ---- 12. Build manifest -------------------------------------------------
     plots: List[Plot] = []
