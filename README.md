@@ -117,7 +117,7 @@ one remote.
 
 ```text
   ┌──────────────┐         ┌──────────────────────────┐
-  │  any browser │ ──HTTP─▶│  cluster host           │
+  │  any browser │ ──HTTP─▶│  cluster host            │
   │  (user)      │         │  ┌────────────────────┐  │
   └──────────────┘         │  │ backend (uvicorn)  │  │
                            │  │  :8000             │  │
