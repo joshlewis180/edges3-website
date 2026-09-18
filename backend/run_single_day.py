@@ -575,38 +575,53 @@ def read_antenna_acq(root: Path, spec_timestamp: str) -> GSData:
 def align_s11_grids(root: Path, s11date: str) -> List[Dict[str, Any]]:
     """Resample ``{s11date}_*.s1p`` files onto a common grid in place.
 
-    Returns a list of warning dicts describing any files that were
-    resampled. Each entry has::
+    When files in a single ``YYYY_DDD_HH`` set have different point
+    counts (typical when the VNA was reconfigured mid-session), EDGES's
+    ``gamma_de_embed`` raises ``ValueError: shapes (49,) (151,)`` and
+    the run fails. We fix this by resampling all files onto the
+    SMALLEST count present — that way every value in the output comes
+    from real measurements (no extrapolation), at the cost of narrowing
+    the calibration's frequency range.
+
+    Returns a list of warning dicts describing the resampled files::
 
         {
             "type": "s11_grid_mismatch",
-            "file": "2026_256_23_amb.s1p",
-            "from_count": 49,
-            "to_count": 151,
-            "from_range_mhz": [40.0, 91.2],
-            "to_range_mhz": [40.0, 200.0],
-            "note": "Resampled onto the dominant grid; values outside "
-                    "the original measurement range are NaN.",
+            "file": "2026_256_23_O.s1p",
+            "from_count": 151,
+            "to_count": 49,
+            "from_range_mhz": [40.0, 200.0],
+            "to_range_mhz": [40.0, 91.2],
+            "note": "Resampled onto the smallest grid in the date "
+                    "set so every output point is a real measurement.",
         }
 
-    The function is idempotent: if all files already share a grid,
-    the list is empty and no files are touched.
+    The function is idempotent: if all files already share a grid, the
+    list is empty and no files are touched. Files are read with EDGES's
+    Touchstone-aware reader (``read_s1p``) and written back as
+    ``BEGIN/RI/END`` — both formats handle ``BEGIN/DB/END`` and the
+    ``# RI/MA/DB`` settings-line variants.
     """
     warnings: List[Dict[str, Any]] = []
+    reference: Dict[str, Any] = {}
     files = sorted(root.glob(f"{s11date}_*.s1p"))
     if len(files) < 2:
         return warnings
 
-    # Read each file, capture (freqs_hz, complex_s11).
+    # Lazy import — only needed when there is actually a mismatch.
+    from edges.io.vna import read_s1p  # noqa: E402
+
     grids: Dict[Path, Tuple[np.ndarray, np.ndarray]] = {}
     for f in files:
         try:
-            data = np.loadtxt(f, comments=["#", "!", ";"])
+            sparams = read_s1p(f)
+            freqs = sparams["frequency"].to_value("Hz").astype(float)
+            s11 = np.asarray(sparams["s11"], dtype=complex)
         except Exception:
             continue
-        if data.ndim != 2 or data.shape[0] == 0 or data.shape[1] < 3:
+        if freqs.size == 0 or s11.size == 0:
             continue
-        grids[f] = (data[:, 0].astype(float), data[:, 1] + 1j * data[:, 2])
+        grids[f] = (freqs, s11)
 
     if len(grids) < 2:
         return warnings
@@ -616,31 +631,39 @@ def align_s11_grids(root: Path, s11date: str) -> List[Dict[str, Any]]:
     if len(distinct) <= 1:
         return warnings  # all aligned already
 
-    # Pick the largest grid as target.
-    target_count = max(distinct)
-    # The "reference" file is whichever 151-pt file exists; if none, any
-    # file with the target count.
-    target_file = next(f for f, n in counts.items() if n == target_count)
+    # Resample DOWN onto the smallest grid — every output value is a
+    # real measurement; calibration range narrows to the smallest file's
+    # span. This is the conservative choice: no extrapolation, no NaN.
+    target_count = min(distinct)
+    target_files = [f for f, n in counts.items() if n == target_count]
+    target_file = target_files[0]
     target_freqs = grids[target_file][0]
     target_fmin_mhz = float(target_freqs[0]) / 1e6
     target_fmax_mhz = float(target_freqs[-1]) / 1e6
 
+    reference = {
+        "type": "s11_grid_reference",
+        "file": target_file.name,
+        "count": int(target_count),
+        "range_mhz": [round(target_fmin_mhz, 4),
+                      round(target_fmax_mhz, 4)],
+    }
+
     for f, (freqs, s11) in grids.items():
         if len(freqs) == target_count and np.allclose(freqs, target_freqs):
             continue
-        # Resample real + imag onto the target grid; mark out-of-range
-        # points as NaN so calibration stays honest beyond the original
-        # measurement range.
         new_real = np.interp(target_freqs, freqs, s11.real)
         new_imag = np.interp(target_freqs, freqs, s11.imag)
-        out_of_range = (target_freqs < freqs[0]) | (target_freqs > freqs[-1])
-        if out_of_range.any():
-            new_real = new_real.astype(float).copy()
-            new_imag = new_imag.astype(float).copy()
-            new_real[out_of_range] = np.nan
-            new_imag[out_of_range] = np.nan
-        out = np.column_stack([target_freqs, new_real, new_imag])
-        np.savetxt(f, out, fmt="%.6f %.8e %.8e")
+
+        # Write back in Touchstone v1 BEGIN/RI/END format — frequency in
+        # Hz, S11 as real/imag. EDGES's reader always interprets
+        # ``d[:,0]`` as Hz regardless of the settings line, so
+        # BEGIN/RI/END with no unit prefix is the safe choice.
+        with open(f, "w") as fh:
+            fh.write("BEGIN\nRI\n")
+            for fr_hz, rr, ii in zip(target_freqs, new_real, new_imag):
+                fh.write(f"{fr_hz:.6f} {rr:.8e} {ii:.8e}\n")
+            fh.write("END\n")
         warnings.append({
             "type": "s11_grid_mismatch",
             "file": f.name,
@@ -648,17 +671,30 @@ def align_s11_grids(root: Path, s11date: str) -> List[Dict[str, Any]]:
             "to_count": int(target_count),
             "from_range_mhz": [round(float(freqs[0]) / 1e6, 4),
                                round(float(freqs[-1]) / 1e6, 4)],
-            "to_range_mhz": [round(target_fmin_mhz, 4),
-                             round(target_fmax_mhz, 4)],
-            "note": (
-                "Resampled onto the dominant grid; values outside the "
-                "original measurement range are NaN."
-            ),
+            "to_range_mhz": reference["range_mhz"],
         })
 
-    # Stable order so the UI list is deterministic.
     warnings.sort(key=lambda w: w["file"])
-    return warnings
+    # Return a single envelope so the API can ship the reference plus
+    # the per-file warnings in one document.
+    return [{"reference": reference, "warnings": warnings}]
+
+
+def _flatten_align_result(
+    result: List[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Unwrap the envelope returned by :func:`align_s11_grids`.
+
+    The function returns either ``[]`` (no resampling) or a single
+    envelope ``[{"reference": ..., "warnings": ...}]``. This helper
+    splits that into the (reference, warnings) pair that
+    ``run_receiver_calibration`` and the API actually consume, keeping
+    the no-op case as ``({}, [])``.
+    """
+    if not result:
+        return {}, []
+    env = result[0]
+    return env.get("reference", {}), env.get("warnings", [])
 
 
 # ---------------------------------------------------------------------------
@@ -691,28 +727,36 @@ def run_receiver_calibration(
 
     Before calling EDGES, the helper ``align_s11_grids`` resamples any
     ``{s11_run}_*.s1p`` file that has a different point count onto the
-    dominant grid (out-of-range points become NaN). This is what keeps
-    the pipeline running when the VNA was reconfigured mid-session.
-    Warnings about resampled files are written to
-    ``<outdir>/../s11_grid_warnings.json`` so the API can surface them.
+    smallest grid present in the date set, so every output point is a
+    real measurement. This is what keeps the pipeline running when the
+    VNA was reconfigured mid-session. Warnings about resampled files
+    are written to ``<outdir>/../s11_grid_warnings.json`` so the API
+    can surface them.
     """
     year, day = parse_yyyy_ddd(cal_date)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    s11_warnings = align_s11_grids(root, s11_run)
+    s11_reference, s11_warnings = _flatten_align_result(
+        align_s11_grids(root, s11_run)
+    )
     if s11_warnings:
         warnings_path = outdir.parent / "s11_grid_warnings.json"
         warnings_path.parent.mkdir(parents=True, exist_ok=True)
         with open(warnings_path, "w") as wf:
-            json.dump({"warnings": s11_warnings}, wf, indent=2)
-        for w in s11_warnings:
-            print(
-                f"[run] WARNING: {w['file']} had {w['from_count']} pts "
-                f"({w['from_range_mhz'][0]}–{w['from_range_mhz'][1]} MHz); "
-                f"resampled to {w['to_count']} pts ({w['to_range_mhz'][0]}–"
-                f"{w['to_range_mhz'][1]} MHz) with NaN outside the "
-                f"original range."
+            json.dump(
+                {"reference": s11_reference, "warnings": s11_warnings},
+                wf, indent=2,
             )
+        ref_name = s11_reference.get("file", "?")
+        ref_range = s11_reference.get("range_mhz", [0, 0])
+        print(
+            f"[run] WARNING: S11 grid mismatch — VNA was reconfigured "
+            f"mid-session. Reference file is {ref_name} "
+            f"({s11_reference.get('count', '?')} pts, "
+            f"{ref_range[0]}–{ref_range[1]} MHz). Resampled "
+            f"{len(s11_warnings)} files down to match; calibration is "
+            f"restricted to {ref_range[0]}–{ref_range[1]} MHz."
+        )
 
     alancal_edges3(
         data=Edges3CalobsParams(

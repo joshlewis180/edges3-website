@@ -300,7 +300,17 @@ def _write_latest(run_id: str, dates: Dict[str, str]) -> None:
     if warnings_file.exists():
         try:
             with open(warnings_file, "r") as wf:
-                payload["warnings"] = json.load(wf).get("warnings", [])
+                doc = json.load(wf)
+            # ``doc`` has ``{"reference": {...}, "warnings": [...]}``.
+            # Frontend expects a flat array of warning envelopes, so
+            # we return both fields as separate entries with the same
+            # ``type`` discriminator.
+            envelope = []
+            ref = doc.get("reference")
+            if ref:
+                envelope.append(ref)
+            envelope.extend(doc.get("warnings", []))
+            payload["warnings"] = envelope
         except Exception:
             pass
 

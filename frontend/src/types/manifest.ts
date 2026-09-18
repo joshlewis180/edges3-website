@@ -78,15 +78,23 @@ export interface ActualTemperature {
   temperature_k: number | null
 }
 
-export interface S11GridWarning {
+export interface S11GridReference {
+  type: "s11_grid_reference"
+  file: string
+  count: number
+  range_mhz: [number, number]
+}
+
+export interface S11GridMismatch {
   type: "s11_grid_mismatch"
   file: string
   from_count: number
   to_count: number
   from_range_mhz: [number, number]
   to_range_mhz: [number, number]
-  note: string
 }
+
+export type S11GridWarning = S11GridReference | S11GridMismatch
 
 export interface LatestRunInfo {
   source: PlotSource | null

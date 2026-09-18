@@ -12,7 +12,11 @@
 import { useState } from "react"
 import { useRunState } from "../state/RunContext"
 import { BASE_URL } from "../utils/baseURL"
-import type { ActualTemperature, S11GridWarning } from "../types/manifest"
+import type {
+  ActualTemperature,
+  S11GridMismatch,
+  S11GridReference,
+} from "../types/manifest"
 
 type BannerProps = {
   pageTitle?: string
@@ -65,7 +69,13 @@ export default function LatestRunBanner({ pageTitle }: BannerProps) {
     .filter((line): line is string => Boolean(line))
 
   const warnings = latest.warnings ?? []
-  const s11Warnings = warnings.filter((w): w is S11GridWarning => w.type === "s11_grid_mismatch")
+  const s11Reference = warnings.find(
+    (w): w is S11GridReference => w.type === "s11_grid_reference",
+  )
+  const s11Mismatches = warnings.filter(
+    (w): w is S11GridMismatch => w.type === "s11_grid_mismatch",
+  )
+  const hasS11Warning = s11Reference !== undefined || s11Mismatches.length > 0
 
   async function handleSave() {
     setSaving(true)
@@ -112,30 +122,46 @@ export default function LatestRunBanner({ pageTitle }: BannerProps) {
         {dateLine && <div className="small">{dateLine}</div>}
       </div>
 
-      {s11Warnings.length > 0 && (
+      {hasS11Warning && s11Reference && (
         <div
           className="alert alert-warning py-2 px-3 mb-0 small"
           role="alert"
           data-testid="s11-grid-warning"
         >
-          <strong>S11 grid mismatch detected.</strong>{" "}
-          {s11Warnings.length === 1
-            ? "One .s1p file was resampled before calibration:"
-            : `${s11Warnings.length} .s1p files were resampled before calibration:`}
-          <ul className="mb-0 mt-1 ps-3">
-            {s11Warnings.map((w) => (
-              <li key={w.file}>
-                <code>{w.file}</code>: {w.from_count} pts&nbsp;
-                ({w.from_range_mhz[0].toFixed(2)}&ndash;
-                {w.from_range_mhz[1].toFixed(2)}&nbsp;MHz)
-                &nbsp;\u2192&nbsp;{w.to_count}&nbsp;pts&nbsp;
-                ({w.to_range_mhz[0].toFixed(2)}&ndash;
-                {w.to_range_mhz[1].toFixed(2)}&nbsp;MHz).
-                Calibration is only valid inside the original measurement
-                range; points outside are NaN.
-              </li>
-            ))}
-          </ul>
+          <strong>S11 sweep mismatch.</strong>{" "}
+          The VNA was reconfigured mid-session, so the{" "}
+          <code>{s11Reference.file}</code> file was logged at a coarser
+          sweep ({s11Reference.count}&nbsp;pts,{" "}
+          {s11Reference.range_mhz[0].toFixed(1)}&ndash;
+          {s11Reference.range_mhz[1].toFixed(1)}&nbsp;MHz) than the rest
+          of the {latest.dates.s11} set. EDGES requires a single
+          frequency grid, so{" "}
+          {s11Mismatches.length === 1
+            ? "1 file was resampled down"
+            : `${s11Mismatches.length} files were resampled down`}{" "}
+          to match. Calibration is therefore restricted to{" "}
+          {s11Reference.range_mhz[0].toFixed(1)}&ndash;
+          {s11Reference.range_mhz[1].toFixed(1)}&nbsp;MHz.
+          {s11Mismatches.length > 0 && (
+            <details className="mt-1">
+              <summary className="text-muted">
+                Show {s11Mismatches.length} resampled file
+                {s11Mismatches.length === 1 ? "" : "s"}
+              </summary>
+              <div className="mt-1">
+                {s11Mismatches.map((w) => (
+                  <span key={w.file} className="me-2">
+                    <code>{w.file}</code>{" "}
+                    <span className="text-muted">
+                      ({w.from_count}&nbsp;pts{" "}
+                      {w.from_range_mhz[0].toFixed(1)}&ndash;
+                      {w.from_range_mhz[1].toFixed(1)}&nbsp;MHz)
+                    </span>
+                  </span>
+                ))}
+              </div>
+            </details>
+          )}
         </div>
       )}
 
