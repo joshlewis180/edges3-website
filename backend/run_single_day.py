@@ -720,36 +720,46 @@ def _install_s11_shadow_reader(
     s11date: str,
     shadow_dir: Path,
 ):
-    """Monkey-patch ``edges.io.vna.read_s1p`` so reads of
-    ``{s11date}_*.s1p`` under ``root`` resolve to ``shadow_dir``.
+    """Monkey-patch EDGES's ``ReflectionCoefficient.from_s1p`` so reads
+    of ``{s11date}_*.s1p`` under ``root`` resolve to ``shadow_dir``.
 
-    Returns a callable that restores the original reader. The caller
-    MUST invoke it (typically in a ``finally`` block) so other code
-    that reads .s1p files (e.g. the antenna S11 calibration later in
-    the pipeline) is unaffected.
+    Returns a callable that restores the original classmethod. The
+    caller MUST invoke it (typically in a ``finally`` block) so other
+    code that reads .s1p files (e.g. the antenna S11 calibration later
+    in the pipeline) is unaffected.
+
+    Note: patching ``edges.io.vna.read_s1p`` alone is NOT enough —
+    EDGES imports it under three different names
+    (``edges.io.vna.read_s1p``, ``edges.io.read_s1p``, and
+    ``edges.cal.sparams.core.datatypes.read_s1p``). Patching
+    ``ReflectionCoefficient.from_s1p`` instead sidesteps all three
+    import bindings in one go.
     """
-    import edges.io.vna as vna_io  # noqa: E402
+    import edges.cal.sparams.core.datatypes as dt  # noqa: E402
 
-    original = vna_io.read_s1p
+    original = dt.ReflectionCoefficient.from_s1p
     root_resolved = root.resolve()
 
-    def patched(path, *args, **kwargs):
+    def patched(cls, path):
         p = Path(path)
         try:
             if p.parent.resolve() == root_resolved and p.name.startswith(f"{s11date}_"):
                 shadow_path = shadow_dir / p.name
                 if shadow_path.exists():
-                    return original(shadow_path, *args, **kwargs)
+                    # Call the *unbound* underlying function — the
+                    # original classmethod is already bound to ``cls``,
+                    # so we go through ``__func__``.
+                    return original.__func__(cls, shadow_path)
         except OSError:
             # ``Path.resolve()`` can fail on broken symlinks; fall
             # through to the original reader in that case.
             pass
-        return original(path, *args, **kwargs)
+        return original.__func__(cls, path)
 
-    vna_io.read_s1p = patched
+    dt.ReflectionCoefficient.from_s1p = classmethod(patched)
 
     def restore():
-        vna_io.read_s1p = original
+        dt.ReflectionCoefficient.from_s1p = original
 
     return restore
 
