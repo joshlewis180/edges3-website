@@ -844,6 +844,28 @@ def process_single_day(
         raw_root, s11_date, target_freqs=target_freqs,
     )
 
+    # Mask the antenna S11 to NaN outside the polynomial's fit window
+    # (58–105 MHz). Outside that window the polynomial extrapolation with
+    # set_transform_range=True produces absurd values — e.g. real/imag
+    # magnitudes of order 1e14 — which make the K-matrix denominator
+    # K1 → 0 (causing a, b → NaN) or produce wildly wrong calibration
+    # (causing Tcal to go negative at the band edges). NaN at the S11
+    # level propagates as NaN through every downstream product: a, b,
+    # Tcal, and the S11 plot itself. This is the honest answer: the
+    # calibration is only valid where the S11 fit is valid.
+    s11_mask = (
+        (ant_s11_model.freqs >= 58.0 * un.MHz)
+        & (ant_s11_model.freqs <= 105.0 * un.MHz)
+    )
+    ant_s11_model = ReflectionCoefficient(
+        reflection_coefficient=np.where(
+            s11_mask, ant_s11_model.reflection_coefficient, np.nan + 0j
+        ),
+        freqs=ant_s11_model.freqs,
+    )
+    ant_real = np.where(s11_mask, ant_real, np.nan)
+    ant_imag = np.where(s11_mask, ant_imag, np.nan)
+
     # ---- 4. P0/P1/P2/Q and raw spectra --------------------------------------
     p0 = raw_data.data[0, 0]
     p1 = raw_data.data[1, 0]
