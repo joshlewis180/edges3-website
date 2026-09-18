@@ -908,14 +908,17 @@ def process_single_day(
     _save_freq_y(coeff_dir, f"{cal_date}_unc.npz", cal_freqs_mhz, np.asarray(calobs.Tunc))
     _save_freq_y(coeff_dir, f"{cal_date}_cos.npz", cal_freqs_mhz, np.asarray(calobs.Tcos))
     _save_freq_y(coeff_dir, f"{cal_date}_sin.npz", cal_freqs_mhz, np.asarray(calobs.Tsin))
-    # Linear frontend coefficients. EDGES surfaces them as ``Tsca`` /
-    # ``Toff`` (which are ``tns * sca`` and ``tload - ofs`` in specal.txt
-    # notation); some EDGES versions may also expose ``T0``/``T1``
-    # directly, in which case we prefer those.
-    T0 = getattr(calobs, "T0", None) or np.asarray(calobs.Tsca)
-    T1 = getattr(calobs, "T1", None) or np.asarray(calobs.Toff)
-    _save_freq_y(coeff_dir, f"{cal_date}_scale_temperature.npz", cal_freqs_mhz, np.asarray(T0))
-    _save_freq_y(coeff_dir, f"{cal_date}_offset_temperature.npz", cal_freqs_mhz, np.asarray(T1))
+    # Actual linear coefficients used by ``calibrate_q``: ``Tcal = q*a + b``.
+    # ``a = Tsca / K1`` and ``b = (Toff - (Tunc*K2 + Tcos*K3 + Tsin*K4)) / K1``,
+    # where ``K = (K1, K2, K3, K4) = get_K(gamma_rec, gamma_ant)`` depends on
+    # BOTH the receiver S11 and the antenna S11. ``calobs.get_linear_coefficients``
+    # re-evaluates on the specal.txt grid, smoothing the antenna S11 onto
+    # ``calobs.freqs`` if needed.
+    a_q, b_q = calobs.get_linear_coefficients(
+        ant_s11=ant_s11_model, freqs=calobs.freqs
+    )
+    _save_freq_y(coeff_dir, f"{cal_date}_a.npz", cal_freqs_mhz, np.asarray(a_q.value))
+    _save_freq_y(coeff_dir, f"{cal_date}_b.npz", cal_freqs_mhz, np.asarray(b_q.value))
 
     # ---- 8. Calibration temperatures derived from the analysis ------------
     # The receiver calibration writes two relevant files:
@@ -1203,10 +1206,18 @@ def process_single_day(
             "scale_temperature": "Scale temperature  [K]",
             "offset_temperature": "Offset temperature  [K]",
         }
+        # ``scale_temperature`` and ``offset_temperature`` are the actual
+        # linear coefficients ``a`` and ``b`` used by ``Tcal = q*a + b``
+        # (not the raw ``Tsca``/``Toff`` inputs). They're saved with the
+        # ``_a``/``_b`` filename suffixes so the npz files match their
+        # physical meaning; the plot id and title stay the same.
+        file_suffix = "a" if coeff == "scale_temperature" else (
+            "b" if coeff == "offset_temperature" else coeff
+        )
         plots.append(Plot(
             page=PAGE_CALIBRATION, id=coeff, type="single",
             title=title_map[coeff],
-            filePath=rel("calibration_coefficients", f"{cal_date}_{coeff}.npz"),
+            filePath=rel("calibration_coefficients", f"{cal_date}_{file_suffix}.npz"),
             xKey="x", yKey="y",
             axisx="Frequency [MHz]",
             axisy="Temperature [K]",
