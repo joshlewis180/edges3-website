@@ -63,10 +63,6 @@ cd frontend
 npm install                 # one-off
 ```
 
-That's it — you don't need to build a static bundle for development.
-Vite serves the SPA in dev mode and proxies API calls to the backend
-during development.
-
 ---
 
 ## Run the two servers (every session, on the SSH cluster)
