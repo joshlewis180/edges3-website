@@ -5,7 +5,7 @@
 
 export type PlotType = "s11" | "single" | "multi" | "image" | "heatmap"
 export type PageName = "calibration" | "calibrated" | "raw"
-export type PlotSource = "daemon" | "user"
+export type PlotSource = "user"
 
 export interface RunDates {
   cal?: string
@@ -64,7 +64,7 @@ export type Plot = S11Plot | SinglePlot | MultiPlot | ImagePlot | HeatmapPlot
 
 export interface Manifest {
   latest_run: string
-  /** 'daemon' or 'user' — which pipeline produced this manifest. */
+  /** 'user' — which pipeline produced this manifest. */
   source?: PlotSource
   dates?: RunDates
   generated_at?: string

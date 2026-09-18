@@ -7,8 +7,6 @@ Endpoints
 GET  /available_dates        List of dates per category (cached on disk)
 GET  /manifest.json          The manifest for the currently displayed run
 GET  /latest_run             JSON pointer to the currently displayed run
-GET  /daemon/status          Whether the in-process scheduler is enabled / active
-POST /daemon/trigger         Run the daemon pipeline once (admin)
 POST /run_pipeline           Trigger a user-run with custom dates / parameters
 POST /save_outputs           Bundle the current outputs into a downloadable zip
 GET  /download/<name>        Download a previously saved zip
@@ -16,14 +14,14 @@ GET  /health                 Liveness probe
 
 Static files
 ------------
-The output root (and its ``daemon/`` and ``user/`` subdirs) are mounted under
-``/`` so that ``/manifest.json``, ``/daemon/runs/<id>/...`` etc. are directly
-fetchable by the browser.
+``OUTPUT_ROOT`` is mounted under ``/`` so that ``/manifest.json``,
+``/runs/<id>/...``, ``/saved/<name>.zip``, etc. are directly fetchable
+by the browser.
 
 Concurrency
 -----------
-A single ``RunLock`` serialises pipeline runs so that two simultaneous user
-clicks (or a user click during a daemon tick) cannot clobber each other.
+A single ``RunLock`` serialises pipeline runs so that two simultaneous
+clicks cannot clobber each other.
 """
 
 from __future__ import annotations
@@ -50,7 +48,6 @@ from pydantic import BaseModel, Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
-import daemon as daemon_mod  # noqa: E402
 import scan_dates  # noqa: E402
 from io_utils import compute_run_hash  # noqa: E402
 
@@ -64,12 +61,14 @@ config.ensure_dirs()
 # ---------------------------------------------------------------------------
 # Pipeline parameter schema (mirrors Select.tsx)
 # ---------------------------------------------------------------------------
+# S11 plots and calibrated spectra use 40–190 MHz so the EDGES science
+# band (50–190 MHz) is visible with band-edge context on either side.
 PIPELINE_DEFAULTS: Dict[str, Any] = {
     "cterms": 6,
     "wterms": 5,
-    "fstart": 50.0,
+    "fstart": 40.0,
     "fstop": 190.0,
-    "wfstart": 50.0,
+    "wfstart": 40.0,
     "wfstop": 190.0,
     "save_2d_npz": False,
 }
@@ -179,13 +178,32 @@ def _ensure_dates_scanned(force: bool = False) -> Dict[str, List[str]]:
     }
 
 
-def _wipe_user_outputs() -> int:
-    """Delete everything under ``OUTPUT_ROOT/user`` except saved zips."""
+# ---------------------------------------------------------------------------
+# Run-history dedup
+# ---------------------------------------------------------------------------
+# A user-triggered run with the same (dates, parameters) hash as a
+# previous run can be reused — we just copy the prior outputs into a new
+# timestamped directory rather than recomputing. The most-recent user run
+# is preserved here (one entry per hash) so a follow-up click with the
+# same parameters dedups against it.
+USER_CACHE_DIR: Path = config.OUTPUT_ROOT / "user_cache"
+
+
+def _wipe_current_outputs() -> int:
+    """Delete everything under OUTPUT_ROOT except ``saved/``,
+    ``user_cache/``, ``run_history/``, and ``available_dates.json``.
+
+    The keep set preserves the dedup machinery: ``run_history`` markers
+    tell us which runs to reuse, ``user_cache`` stashes the previous
+    run's outputs so a click with the same parameters can dedup against
+    it.
+    """
     removed = 0
-    if not config.USER_DIR.exists():
+    if not config.OUTPUT_ROOT.exists():
         return 0
-    for entry in config.USER_DIR.iterdir():
-        if entry.name == "saved":
+    keep = {"saved", "user_cache", "run_history", "available_dates.json"}
+    for entry in config.OUTPUT_ROOT.iterdir():
+        if entry.name in keep:
             continue
         if entry.is_dir():
             shutil.rmtree(entry)
@@ -195,28 +213,16 @@ def _wipe_user_outputs() -> int:
     return removed
 
 
-# A small cache that holds the previous human-done run so a follow-up click
-# with the same parameters can be deduped against it. Only the most recent
-# user run for any given hash is preserved here. (Directory location lives in
-# config.USER_CACHE_DIR.)
-USER_CACHE_DIR = config.USER_CACHE_DIR
-
-
 def _stash_previous_user_run(current_hash: str) -> Optional[str]:
-    """Copy the current ``user/runs/<run_id>/`` directory into
-    ``user_cache/<previous_hash>/`` so a later identical click can dedup
-    against it.
+    """Copy the current ``runs/<run_id>/`` directory into
+    ``user_cache/<previous_hash>/`` so a later identical click can
+    dedup against it.
 
     Returns the previous hash (or None if there was nothing to stash).
-
-    The cache is intentionally small (a few most-recent hashes); older
-    entries are evicted. That keeps the on-disk footprint bounded while
-    still letting the common "click the same thing twice" pattern dedup.
     """
-    runs_root = config.USER_DIR / "runs"
+    runs_root = config.RUNS_DIR
     if not runs_root.exists():
         return None
-    # Pick the most recently modified run directory as "the current user run".
     candidates = sorted(
         (p for p in runs_root.iterdir() if p.is_dir()),
         key=lambda p: p.stat().st_mtime,
@@ -226,7 +232,6 @@ def _stash_previous_user_run(current_hash: str) -> Optional[str]:
         return None
     previous = candidates[0]
 
-    # Determine the hash of this previous run from its run_history marker.
     prev_hash: Optional[str] = None
     for marker in config.RUN_HISTORY_DIR.glob("*.json"):
         try:
@@ -234,7 +239,7 @@ def _stash_previous_user_run(current_hash: str) -> Optional[str]:
                 meta = json.load(f)
         except Exception:
             continue
-        if meta.get("run_id") == previous.name and meta.get("source") == "user":
+        if meta.get("run_id") == previous.name:
             prev_hash = marker.stem
             break
 
@@ -243,14 +248,9 @@ def _stash_previous_user_run(current_hash: str) -> Optional[str]:
 
     USER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     target_dir = USER_CACHE_DIR / prev_hash
-    # If we already have a fresh cache entry for this hash, leave it alone.
     if not target_dir.exists():
         shutil.copytree(previous, target_dir)
-        # Also copy the per-source manifest so the cache entry is
-        # self-contained. Without this, ``_find_existing_run`` cannot tell
-        # whether the cached run is still valid after the next wipe
-        # (which removes ``OUTPUT_ROOT/user/manifest.json``).
-        src_manifest = config.USER_DIR / "manifest.json"
+        src_manifest = config.OUTPUT_ROOT / "manifest.json"
         if src_manifest.exists():
             shutil.copy(src_manifest, target_dir / "manifest.json")
         with open(target_dir / ".cache_meta.json", "w") as f:
@@ -259,8 +259,6 @@ def _stash_previous_user_run(current_hash: str) -> Optional[str]:
                 "original_run_id": previous.name,
                 "stashed_at": datetime.now().isoformat(),
             }, f, indent=2)
-
-    # Evict the oldest cache entries until we are within the cap.
     _evict_old_cache_entries(_USER_CACHE_CAP)
     return prev_hash
 
@@ -285,18 +283,7 @@ def _find_existing_run(
     run_hash: str,
     want_2d: bool,
 ) -> Optional[Tuple[str, Path, Dict[str, Any]]]:
-    """Look for a previous run with matching hash that can be reused.
-
-    Returns ``(source, source_path, meta)`` or None.
-    Matching rules:
-      * Daemon runs never include 2D data, so they can only be reused when
-        ``want_2d`` is False.
-      * User runs (either from the live ``user/`` tree or the
-        ``user_cache/`` shadow) match whenever their recorded ``save_2d_npz``
-        equals the request.
-      * ``run_history`` markers whose ``source_path`` no longer exist are
-        ignored.
-    """
+    """Look for a previous run with matching hash that can be reused."""
     marker = config.RUN_HISTORY_DIR / f"{run_hash}.json"
     if not marker.exists():
         return None
@@ -306,49 +293,30 @@ def _find_existing_run(
     except Exception:
         return None
 
-    source = meta.get("source")
     recorded_2d = bool(meta.get("params", {}).get("save_2d_npz"))
     if want_2d != recorded_2d:
-        return None  # e.g. user wants 2D but only a daemon (no 2D) run exists
-    if source not in ("daemon", "user"):
         return None
 
-    # Priority: user cache > recorded source path. The user cache is the
-    # most recent user run with this hash; if it exists, prefer it so we
-    # stay aligned with what the user saw last.
     candidates: List[Tuple[str, Path]] = []
     cached = USER_CACHE_DIR / run_hash
     if cached.exists() and (cached / "manifest.json").exists():
         candidates.append(("user", cached))
     src_path = Path(meta.get("source_path", ""))
     if src_path.exists():
-        candidates.append((source, src_path))
+        candidates.append(("user", src_path))
 
     for cand_source, cand in candidates:
-        # The manifest lives at the per-source root (``OUTPUT_ROOT/<source>/manifest.json``),
-        # two levels above ``runs/<id>/``. Accept either location so the dedup check works
-        # regardless of which level the caller recorded.
-        # For the user_cache shadow the per-source manifest is at
-        # ``OUTPUT_ROOT/user/manifest.json`` (the user's most recent run).
         manifest_in_run = cand / "manifest.json"
-        if cand_source == "user" and cand.parent.name == "user_cache":
-            # ``cand`` is e.g. ``OUTPUT_ROOT/user_cache/<hash>/``; the matching
-            # per-source manifest is at ``OUTPUT_ROOT/user/manifest.json``.
-            manifest_in_source = cand.parent.parent / "user" / "manifest.json"
-        else:
-            manifest_in_source = cand.parent.parent / "manifest.json"
-        if manifest_in_run.exists() or manifest_in_source.exists():
+        manifest_in_root = cand.parent.parent / "manifest.json"
+        if manifest_in_run.exists() or manifest_in_root.exists():
             return cand_source, cand, meta
     return None
 
 
-def _write_latest(source: str, run_id: str, dates: Dict[str, str]) -> None:
-    # Extract per-load actual temperatures from the per-source manifest so
-    # the top banner can show "ambient @ time: X K" without each plot
-    # needing to repeat the information in its title.
+def _write_latest(run_id: str, dates: Dict[str, str]) -> None:
+    """Refresh the ``latest_run.json`` pointer."""
     actual_temps: Dict[str, Dict[str, Any]] = {}
-    source_root = config.USER_DIR if source == "user" else config.DAEMON_DIR
-    src_manifest = source_root / "manifest.json"
+    src_manifest = config.OUTPUT_ROOT / "manifest.json"
     if src_manifest.exists():
         try:
             with open(src_manifest, "r") as f:
@@ -363,17 +331,14 @@ def _write_latest(source: str, run_id: str, dates: Dict[str, str]) -> None:
         except Exception:
             pass
     payload: Dict[str, Any] = {
-        "source": source,
+        "source": "user",
         "run_id": run_id,
         "dates": dates,
         "generated_at": datetime.now().isoformat(),
     }
     if actual_temps:
         payload["actual_temperatures"] = actual_temps
-    # Flag whether any heatmap (``_2d.npz``) files exist in the current
-    # source tree. The frontend uses this to disable the "Include 2D
-    # heatmaps" checkbox on the save form when there's nothing to include.
-    payload["has_2d"] = any(source_root.rglob("*_2d.npz"))
+    payload["has_2d"] = any(config.OUTPUT_ROOT.rglob("*_2d.npz"))
     _write_json(config.LATEST_RUN_FILE, payload)
 
 
@@ -382,46 +347,6 @@ def _read_actual_temperatures() -> Dict[str, Dict[str, Any]]:
     data = _read_json(config.LATEST_RUN_FILE, {})
     temps = data.get("actual_temperatures", {})
     return temps if isinstance(temps, dict) else {}
-
-
-def _promote_to_top_level(source_root: Path) -> Optional[Path]:
-    """Copy the latest manifest from source_root to OUTPUT_ROOT/manifest.json.
-
-    The per-source manifest stores ``filePath`` values relative to its own
-    root (e.g. ``runs/<id>/foo.npz`` for ``OUTPUT_ROOT/user/manifest.json``).
-    Once the manifest lives at ``OUTPUT_ROOT/manifest.json`` the paths must
-    be prefixed with the source name (``user/runs/<id>/foo.npz``) so the
-    static mount can serve them. This rewrite happens here.
-    """
-    src = source_root / "manifest.json"
-    if not src.exists():
-        return None
-    dst = config.OUTPUT_ROOT / "manifest.json"
-    try:
-        with open(src, "r") as f:
-            manifest = json.load(f)
-    except Exception:
-        shutil.copy(src, dst)
-        return dst
-
-    source_name = source_root.name  # "daemon" or "user"
-    rewritten: List[Dict[str, Any]] = []
-    for plot in manifest.get("plots", []):
-        plot = dict(plot)
-        for key in ("filePath", "filePath1", "filePath2"):
-            v = plot.get(key)
-            if isinstance(v, str):
-                if v.startswith("runs/"):
-                    plot[key] = f"{source_name}/{v}"
-                elif v.startswith(f"{source_name}/runs/"):
-                    # Already prefixed; leave it.
-                    pass
-        rewritten.append(plot)
-    manifest["plots"] = rewritten
-
-    with open(dst, "w") as f:
-        json.dump(manifest, f, indent=2)
-    return dst
 
 
 # ---------------------------------------------------------------------------
@@ -443,7 +368,6 @@ def _build_pipeline_cmd(
     merged: Dict[str, Any],
     output_root: Path,
     run_dir: Path,
-    source: str,
     run_hash: str,
 ) -> List[str]:
     cmd = [
@@ -455,7 +379,7 @@ def _build_pipeline_cmd(
         "--output_root", str(output_root),
         "--run_dir", str(run_dir),
         "--temperature_log", str(config.TEMPERATURE_LOG_FILE),
-        "--source", source,
+        "--source", "user",
         "--run_hash", run_hash,
     ]
     for k in NUMERIC_PIPELINE_KEYS:
@@ -473,25 +397,22 @@ def _copy_run_to(src: Path, dst: Path) -> None:
     shutil.copytree(src, dst)
 
 
-def _build_run_id(source: str, run_hash: str) -> str:
-    return f"{source}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{run_hash}"
+def _build_run_id(run_hash: str) -> str:
+    return f"user_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{run_hash}"
 
 
 def run_pipeline(
     dates: Dict[str, str],
     parameters: Dict[str, Any],
-    source: str,
-    output_root: Path,
-    wipe_target_first: bool = False,
+    wipe_target_first: bool = True,
 ) -> Dict[str, Any]:
-    """Run the pipeline for ``source`` ('user' or 'daemon') with dedup.
+    """Run the pipeline (single user-triggered tree) with dedup.
 
     Dedup rules:
       * Hash from ``(dates, parameters)`` is the dedup key.
-      * Daemon runs only match user requests when ``save_2d_npz`` is False.
-      * A previous user run is preserved in ``OUTPUT_ROOT/user_cache/`` so it
-        can be reused by a later identical click.
-      * Reusing copies the previous outputs into ``output_root/runs/<id>/``
+      * A previous user run is preserved in ``OUTPUT_ROOT/user_cache/`` so
+        it can be reused by a later identical click.
+      * Reusing copies the previous outputs into ``OUTPUT_ROOT/runs/<id>/``
         under a new timestamped run id, then rewrites the manifest pointing
         at that run.
     """
@@ -499,24 +420,20 @@ def run_pipeline(
     resolved = _resolve_dates(dates, available)
     merged = {**PIPELINE_DEFAULTS, **parameters}
 
-    # Hash includes dates and every parameter (including save_2d_npz) so a
-    # user click for 2D data never matches a daemon (2D-free) run.
     run_hash = compute_run_hash(resolved, merged)
     want_2d = bool(merged.get("save_2d_npz"))
 
-    output_root.mkdir(parents=True, exist_ok=True)
+    config.OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
     # ---- Dedup ----------------------------------------------------------
-    if source == "user":
-        # Stash the previous user run before wiping, so we can reuse it later
-        # if the user clicks again with the same parameters.
+    if wipe_target_first:
         _stash_previous_user_run(current_hash=run_hash)
-        _wipe_user_outputs()
+        _wipe_current_outputs()
 
-    existing = _find_existing_run(run_hash, want_2d) if source == "user" else None
+    existing = _find_existing_run(run_hash, want_2d)
 
-    run_id = _build_run_id(source, run_hash)
-    run_dir = output_root / "runs" / run_id
+    run_id = _build_run_id(run_hash)
+    run_dir = config.RUNS_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
     reused_from: Optional[str] = None
@@ -527,10 +444,6 @@ def run_pipeline(
             existing_source, run_hash, existing_path,
         )
         _copy_run_to(existing_path, run_dir)
-        # Rewrite the manifest so the new run_id appears in it.
-        # The manifest lives at the per-source root (one or two levels
-        # above ``existing_path``); never inside the run directory. Try
-        # both candidate locations so a stale cached copy is also found.
         old_manifest: Dict[str, Any] = {}
         for candidate in (
             existing_path / "manifest.json",
@@ -544,19 +457,15 @@ def run_pipeline(
                     break
             except Exception:
                 continue
-        # Re-emit manifest by re-running the manifest writer. We need to
-        # rebuild the plots list, but since the source dir is canonical we
-        # can just copy the old manifest with the new run_id baked in.
         new_manifest = dict(old_manifest)
         new_manifest["latest_run"] = run_dir.name
-        new_manifest["source"] = source
+        new_manifest["source"] = "user"
         new_manifest["dates"] = old_manifest.get("dates", resolved)
         new_manifest["generated_at"] = datetime.now().isoformat()
         new_manifest["reused_from"] = {
             "source": existing_source,
             "path": str(existing_path),
         }
-        # Rewrite plot filePaths so they point into the new run dir.
         new_plot_prefix = f"runs/{run_dir.name}"
         old_prefix = f"runs/{existing_path.name}"
         for plot in new_manifest.get("plots", []):
@@ -564,52 +473,40 @@ def run_pipeline(
                 v = plot.get(key)
                 if isinstance(v, str) and v.startswith(old_prefix):
                     plot[key] = new_plot_prefix + v[len(old_prefix):]
-        out_manifest = output_root / "manifest.json"
+        out_manifest = config.OUTPUT_ROOT / "manifest.json"
         with open(out_manifest, "w") as f:
             json.dump(new_manifest, f, indent=2)
         log.info("Reused manifest written to %s", out_manifest)
 
-        # Re-point the run_history marker at the new user-owned copy. Without
-        # this, every subsequent click would keep matching the original
-        # daemon/user source instead of this user's latest version. The
-        # previous user run is then stashed into user_cache before the next
-        # click wipes it.
-        if source == "user":
-            marker_path = config.RUN_HISTORY_DIR / f"{run_hash}.json"
-            marker_meta: Dict[str, Any] = dict(_meta or {})
-            marker_meta["source"] = "user"
-            marker_meta["run_id"] = run_id
-            marker_meta["source_path"] = str(run_dir)
-            marker_meta["dates"] = resolved
-            marker_meta["params"] = merged
-            marker_meta["saved_at"] = datetime.now().isoformat()
-            marker_meta.pop("hash", None)
-            marker_meta["hash"] = run_hash
-            with open(marker_path, "w") as f:
-                json.dump(marker_meta, f, indent=2)
-            log.info("Re-pointed marker %s -> user run %s", run_hash, run_id)
+        marker_path = config.RUN_HISTORY_DIR / f"{run_hash}.json"
+        marker_meta: Dict[str, Any] = dict(_meta or {})
+        marker_meta["source"] = "user"
+        marker_meta["run_id"] = run_id
+        marker_meta["source_path"] = str(run_dir)
+        marker_meta["dates"] = resolved
+        marker_meta["params"] = merged
+        marker_meta["saved_at"] = datetime.now().isoformat()
+        marker_meta.pop("hash", None)
+        marker_meta["hash"] = run_hash
+        with open(marker_path, "w") as f:
+            json.dump(marker_meta, f, indent=2)
+        log.info("Re-pointed marker %s -> user run %s", run_hash, run_id)
 
         reused_from = existing_source
     else:
         # ---- Fresh pipeline run -----------------------------------------
-        cmd = _build_pipeline_cmd(resolved, merged, output_root, run_dir, source, run_hash)
+        cmd = _build_pipeline_cmd(resolved, merged, config.OUTPUT_ROOT, run_dir, run_hash)
         _execute_subprocess(cmd)
 
-    _write_latest(source, run_id, resolved)
-
-    if source == "user":
-        _promote_to_top_level(output_root)
-    elif source == "daemon":
-        if not (config.USER_DIR / "manifest.json").exists():
-            _promote_to_top_level(output_root)
+    _write_latest(run_id, resolved)
 
     return {
         "success": True,
-        "source": source,
+        "source": "user",
         "run_id": run_id,
         "dates": resolved,
         "parameters": merged,
-        "manifest": f"{source}/manifest.json",
+        "manifest": "manifest.json",
         "run_hash": run_hash,
         "reused_from": reused_from,
     }
@@ -619,8 +516,8 @@ def run_pipeline(
 # Saving outputs as a downloadable zip
 # ---------------------------------------------------------------------------
 def _zip_directory(root: Path, include_2d: bool) -> io.BytesIO:
-    """Create an in-memory zip of ``root`` (recursive). If ``include_2d`` is
-    False, files ending in ``_2d.npz`` are skipped."""
+    """Create an in-memory zip of ``root`` (recursive). If ``include_2d``
+    is False, files ending in ``_2d.npz`` are skipped."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for path in root.rglob("*"):
@@ -650,8 +547,6 @@ app.add_middleware(
 def _startup() -> None:
     config.ensure_dirs()
     _ensure_dates_scanned()
-    if config.DAEMON_ENABLED:
-        daemon_mod.start_scheduler_in_background()
 
 
 @app.get("/health")
@@ -671,42 +566,35 @@ def latest_run() -> Dict[str, Any]:
     })
 
 
-@app.get("/daemon/status")
-def daemon_status() -> Dict[str, Any]:
+@app.get("/pipeline/status")
+def pipeline_status() -> Dict[str, Any]:
     return {
-        "enabled": config.DAEMON_ENABLED,
-        "hour": config.DAEMON_HOUR,
         "raw_data_root_exists": config.RAW_DATA_ROOT.exists(),
         "lock": run_lock.status(),
     }
 
 
-@app.post("/daemon/trigger")
-def daemon_trigger() -> Dict[str, Any]:
-    if not run_lock.acquire(holder="daemon-trigger"):
-        raise HTTPException(status_code=409, detail="Pipeline already running")
-    try:
-        result = run_pipeline(
-            dates={"cal": "Latest", "s11": "Latest", "raw": "Latest"},
-            parameters={"save_2d_npz": False},
-            source="daemon",
-            output_root=config.DAEMON_DIR,
-        )
-        return result
-    finally:
-        run_lock.release(holder="daemon-trigger")
-
-
 @app.post("/run_pipeline")
 def run_pipeline_endpoint(req: RunRequest) -> Dict[str, Any]:
+    """Trigger a pipeline run with the supplied dates and parameters.
+
+    Dates default to ``"Latest"`` (the most recent available date for
+    each category). Parameters override the defaults of
+    ``cterms``, ``wterms``, ``fstart``, ``fstop``, ``wfstart``,
+    ``wfstop``, and ``save_2d_npz``.
+
+    A request with the same (dates, parameters) hash as a previous run
+    is deduped: the prior outputs are copied into a fresh timestamped
+    run directory instead of being recomputed.
+    """
     if not run_lock.acquire(holder="user"):
-        raise HTTPException(status_code=409, detail="Pipeline already running; try again later")
+        raise HTTPException(
+            status_code=409, detail="Pipeline already running; try again later"
+        )
     try:
         return run_pipeline(
             dates=req.dates,
             parameters=req.parameters,
-            source="user",
-            output_root=config.USER_DIR,
             wipe_target_first=True,
         )
     finally:
@@ -715,15 +603,13 @@ def run_pipeline_endpoint(req: RunRequest) -> Dict[str, Any]:
 
 @app.post("/save_outputs")
 def save_outputs(req: SaveRequest) -> Dict[str, Any]:
-    """Zip the currently displayed outputs (prefers the user tree; falls back
-    to the daemon tree) and write to ``OUTPUT_ROOT/saved/<label>.zip``."""
-    source_root = config.USER_DIR if (config.USER_DIR / "manifest.json").exists() else config.DAEMON_DIR
+    """Zip the current outputs and write to ``OUTPUT_ROOT/saved/<label>.zip``."""
     label = (req.label or datetime.now().strftime("run_%Y%m%d_%H%M%S")).strip()
     safe_label = re.sub(r"[^A-Za-z0-9._-]", "_", label)
     out_path = config.SAVED_DIR / f"{safe_label}.zip"
     config.SAVED_DIR.mkdir(parents=True, exist_ok=True)
 
-    buf = _zip_directory(source_root, include_2d=req.include_2d)
+    buf = _zip_directory(config.OUTPUT_ROOT, include_2d=req.include_2d)
     with open(out_path, "wb") as f:
         f.write(buf.getvalue())
 
@@ -733,8 +619,7 @@ def save_outputs(req: SaveRequest) -> Dict[str, Any]:
         "label": safe_label,
         "include_2d": req.include_2d,
         "size_bytes": out_path.stat().st_size,
-        "download_url": f"/download/{safe_label}.zip",
-        "source_root": source_root.name,
+        "download_url": f"/saved/{safe_label}.zip",
         "latest_run": latest,
     }
 
@@ -752,5 +637,6 @@ def download(name: str) -> FileResponse:
 # ---------------------------------------------------------------------------
 # Static file serving — MUST come last so it doesn't shadow the API routes.
 # ---------------------------------------------------------------------------
-# Serve OUTPUT_ROOT at "/" so /manifest.json is reachable.
+# Serve OUTPUT_ROOT at "/" so /manifest.json, /runs/<id>/..., /saved/...
+# are all reachable directly by the browser.
 app.mount("/", StaticFiles(directory=str(config.OUTPUT_ROOT), html=False), name="outputs")

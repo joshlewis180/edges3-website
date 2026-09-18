@@ -1,46 +1,136 @@
 # EDGES-3 Web Interface
 
-A web UI for inspecting the daily calibration / antenna-temperature pipeline
-output from the EDGES-3 instrument. The project is structured so the React
-frontend and the FastAPI backend can be deployed together (local
-development) or split across machines (production on the ASU enterprise
-cluster).
+A web UI for inspecting the EDGES-3 instrument's daily calibration and
+antenna-temperature pipeline output. The React frontend and the FastAPI
+backend are intended to be **installed and run on the SSH cluster**;
+users reach the UI from a laptop by SSH-tunnelling the dev server.
 
 ```
 edges-interface/
-├── backend/          # FastAPI server + daily daemon + EDGES pipeline
+├── backend/          # FastAPI server + EDGES pipeline (Python)
 ├── frontend/         # React + TypeScript + Vite SPA
 ├── README.md         # ← you are here
 ├── LICENSE
 └── .gitignore
 ```
 
-The two halves communicate over HTTP; the frontend never reads files from
-disk directly — it asks the backend for JSON (`/manifest.json`,
+The two halves communicate over HTTP. The frontend never reads files
+from disk directly — it asks the backend for JSON (`/manifest.json`,
 `/latest_run`) and for binary files (`.npz`, `.jpg`) which the backend
 serves from its `OUTPUT_ROOT` static mount.
 
+There is **no daemon**, no scheduler, no systemd unit. Runs happen
+when you click "Run with these dates" on the Select page.
+
 ---
 
-## Quick start (local development)
+## Install (one-time, on the SSH cluster)
+
+### 1. Clone the repo
 
 ```bash
-# 1. Backend
-conda activate edges          # python 3.11 with edges-* packages
-cd backend
-pip install -r requirements.txt
-python -m uvicorn backend_api:app --host 127.0.0.1 --port 8000 --reload
-
-# 2. Frontend (in a second terminal)
-cd frontend
-npm install
-npm run dev                   # serves on http://localhost:5173
+git clone <repo-url> edges-interface
+cd edges-interface
 ```
 
-By default the frontend points at `http://127.0.0.1:8000` (see
-`frontend/src/utils/baseURL.ts`). With both running you can browse the
-output, trigger a manual pipeline run from the UI, and download zips of
-the current `daemon/` or `user/` tree.
+### 2. Install the Python backend (uv)
+
+`uv` reads `backend/requirements.txt` and creates an isolated venv with
+every scientific dependency (`edges-analysis`, `edges-io`, `pygsdata`,
+`read-acq`, `astropy`, `fastapi`, …). No conda environment, no system
+packages.
+
+```bash
+# Install uv once (skip if it's already on PATH):
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Create the venv and install deps:
+uv venv .venv --python 3.11
+source .venv/bin/activate
+uv pip install -r backend/requirements.txt
+```
+
+Verify the install:
+
+```bash
+python backend/config.py    # prints every resolved path + probe number
+```
+
+### 3. Install the frontend
+
+```bash
+cd frontend
+npm install                 # one-off
+```
+
+That's it — you don't need to build a static bundle for development.
+Vite serves the SPA in dev mode and proxies API calls to the backend
+during development.
+
+---
+
+## Run the two servers (every session, on the SSH cluster)
+
+You'll need **two terminals** connected to the SSH cluster.
+
+### Terminal 1 — backend
+
+```bash
+cd edges-interface
+source .venv/bin/activate
+cd backend
+EDGES_PYTHON=$(which python) \
+  python -m uvicorn backend_api:app --host 127.0.0.1 --port 8000
+```
+
+Leave it running. Defaults in `backend/config.py` point at the cluster
+paths (`/data5/edges/data/EDGES3_data/MRO` for raw data,
+`<repo>/outputs` for outputs). Override any of them with the env vars
+documented below.
+
+### Terminal 2 — frontend (Vite dev server)
+
+```bash
+cd edges-interface/frontend
+npm run dev                 # serves on http://localhost:5173
+```
+
+### View the UI from your laptop
+
+The frontend dev server runs on the cluster but listens on `localhost`
+only. SSH-tunnel it to your laptop so your browser can reach it:
+
+```bash
+# From your laptop (NOT the cluster):
+ssh -L 8880:localhost:5173 your_user@edges-cluster.example.com
+```
+
+Now open `http://localhost:8880/` in your laptop's browser. Vite
+proxies API calls to `http://127.0.0.1:8000`, which is the same
+machine's `localhost` from the cluster's perspective — so the
+`VITE_API_URL` default (`http://127.0.0.1:8000`) is exactly right.
+
+> If you want a different local port (e.g. you already use 8880):
+> `ssh -L 9090:localhost:5173 …` then open `http://localhost:9090/`.
+
+---
+
+## What you do in the UI
+
+1. Go to **Select**.
+2. Pick dates (defaults to "Latest" for all three) and parameters (40–190
+   MHz, 6 cterms, 5 wterms, no 2D by default).
+3. Click **Run with these dates**. This calls `POST /run_pipeline`,
+   which wipes any prior run and writes a fresh `outputs/runs/<id>/`
+   directory and `manifest.json`. Dedup: clicking again with the same
+   dates and parameters reuses the previous run instead of recomputing.
+4. Browse the results in **Calibration**, **Raw Data**, and
+   **Calibrated Data**. The plot pages show "Run has not been completed"
+   until you trigger a run.
+
+When you want a copy of the current outputs, click **Save outputs** at
+the top of any data page; the resulting zip lives at
+`outputs/saved/<label>.zip` and is downloadable from the UI.
 
 ---
 
@@ -49,12 +139,12 @@ the current `daemon/` or `user/` tree.
 | Path | Purpose |
 |---|---|
 | `backend/` | Python service |
-| `backend/config.py` | All env-driven paths & tunable defaults (single source of truth) |
+| `backend/config.py` | All env-driven paths and tunable defaults (single source of truth) |
 | `backend/backend_api.py` | FastAPI app — REST endpoints + static-file mount |
-| `backend/daemon.py` | Background scheduler that re-runs the pipeline daily |
 | `backend/run_single_day.py` | The actual EDGES calibration + temperature pipeline |
 | `backend/scan_dates.py` | Scans the raw-data tree and writes `available_dates.json` |
 | `backend/io_utils.py` | Shared dataclasses (`Plot`), hashing, manifest writing |
+| `backend/requirements.txt` | Every Python dep, installed via `uv pip install` |
 | `frontend/` | React + Vite SPA |
 | `frontend/src/utils/baseURL.ts` | Where the frontend reads `VITE_API_URL` from |
 | `frontend/src/state/RunContext.tsx` | Frontend cache of `/latest_run` and refresh counter |
@@ -65,33 +155,29 @@ the current `daemon/` or `user/` tree.
 ## Paths you may want to change
 
 Every path the backend uses is environment-driven. The defaults are in
-`backend/config.py`; override any of them with an env var before launching
-the backend. The frontend has only one configurable path, set at build
-time via Vite.
+`backend/config.py`; override any of them with an env var before
+launching the backend.
 
 ### Backend (runtime env vars)
 
 | Env var | Default | What it controls |
 |---|---|---|
-| `EDGES_RAW_DATA_ROOT` | `/Users/joshualewis/EdgesTestData/data5/edges/data/EDGES3_data/MRO` (local) or `/data5/edges/data/EDGES3_data/MRO` (cluster) | Root of the raw `.acq` + `.log` tree the pipeline reads |
-| `EDGES_OUTPUT_ROOT` | `/Users/joshualewis/EdgesTestData/outputs` (local) or `/data5/edges/edges_outputs` (cluster) | Where the manifest, daemon/user trees, saved zips, and run history are written |
+| `EDGES_RAW_DATA_ROOT` | `/data5/edges/data/EDGES3_data/MRO` | Root of the raw `.acq` + `.log` tree the pipeline reads |
+| `EDGES_OUTPUT_ROOT` | `<repo>/outputs` | Where the manifest, runs, saved zips, and run history are written |
 | `EDGES_TEMP_LOG_FILE` | `$EDGES_RAW_DATA_ROOT/temperature_logger/temperature.log` | Single-file temperature log (legacy) |
 | `EDGES_TEMP_LOG_DIR` | `$EDGES_TEMP_LOG_FILE`'s parent | Directory of log files; every `*.log`, `*.backup`, and `*.txt` in here is read and merged into one timeline |
-| `EDGES_BEAM_FACTOR_FILE` | `$EDGES_RAW_DATA_ROOT/../../e3_beam_factor.hickle` (i.e. `data5/edges/e3_beam_factor.hickle`) | Path to the EDGES-3 antenna beam factor file. Required for the absolute temperature calibration; location differs between local dev and the SSH cluster, so set it explicitly there |
-| `EDGES_PYTHON` | current interpreter (`sys.executable`) | Python the daemon shells out to when running the pipeline |
-| `EDGES_DAEMON_HOUR` | `2` | Hour of day (0-23) at which the daily daemon fires |
-| `EDGES_DAEMON_ENABLED` | `0` | Set to `1` / `true` to start the in-process scheduler on backend startup |
+| `EDGES_BEAM_FACTOR_FILE` | `<RAW_DATA_ROOT>/../../../e3_beam_factor.hickle` (i.e. `data5/edges/e3_beam_factor.hickle`) | Path to the EDGES-3 antenna beam factor file. Required for the absolute temperature calibration; location differs between local dev and the SSH cluster, so set it explicitly there |
+| `EDGES_PYTHON` | current interpreter (`sys.executable`) | Python the backend shells out to when running the pipeline |
 | `EDGES_PROBE_AMBIENT` | `100` | Temperature-log probe for ambient cal |
 | `EDGES_PROBE_HOT` | `102` | Temperature-log probe for hot cal |
 | `EDGES_PROBE_LNA` | `100` | Temperature-log probe for LNA cal |
 | `EDGES_PROBE_COLD_LOAD` | `152` | Temperature-log probe for the cold load (informational) |
 
-Calibration temperatures are now auto-derived from the temperature log at
+Calibration temperatures are auto-derived from the temperature log at
 the matching calibration time and passed straight to the EDGES receiver
-calibration — there are no user-tunable `tcold` / `thot` / `tcab` /
-`tload` / `tns` setpoints anymore. If no probe reading is available at
-the calibration time the pipeline falls back to the internal constants
-(`306.5`, `393.22`, `306.5` K) and logs a warning.
+calibration — there are no user-tunable setpoints. If no probe reading
+is available at the calibration time the pipeline falls back to
+internal constants (`306.5`, `393.22`, `306.5` K) and logs a warning.
 
 The values above are documented programmatically in
 `backend/config.py::describe()`. Run `python backend/config.py` to print
@@ -101,216 +187,106 @@ the resolved configuration.
 
 | Env var | Default | What it controls |
 |---|---|---|
-| `VITE_API_URL` | `http://127.0.0.1:8000` | Base URL the frontend uses for `/manifest.json`, `/latest_run`, `/save_outputs`, and the static-file mount. **Set this at build time** before running `npm run build` when the backend is on a different host (e.g. SSH cluster). |
-
-The frontend reads it in `frontend/src/utils/baseURL.ts`. There is no
-runtime override — Vite inlines it during the build.
-
-### What happens when frontend and backend are split (e.g. SSH port)
-
-The two halves have **no shared filesystem requirement** — the only
-thing that travels between them is JSON and HTTP-served binary files.
-You can host them on the same box, on separate boxes, or one local +
-one remote.
-
-#### SSH deployment (backend on the cluster, frontend anywhere)
-
-```text
-  ┌──────────────┐         ┌──────────────────────────┐
-  │  any browser │ ──HTTP─▶│  cluster host            │
-  │  (user)      │         │  ┌────────────────────┐  │
-  └──────────────┘         │  │ backend (uvicorn)  │  │
-                           │  │  :8000             │  │
-                           │  │  serves API +      │  │
-                           │  │  OUTPUT_ROOT       │  │
-                           │  └────────────────────┘  │
-                           │  ┌────────────────────┐  │
-                           │  │ $EDGES_RAW_DATA_   │  │
-                           │  │   ROOT (.acq+log)  │  │
-                           │  └────────────────────┘  │
-                           │  ┌────────────────────┐  │
-                           │  │ $EDGES_OUTPUT_     │  │
-                           │  │   ROOT (manifest,  │  │
-                           │  │   runs, saved/)    │  │
-                           │  └────────────────────┘  │
-                           └──────────────────────────┘
-```
-
-Step-by-step:
-
-1. **Clone the repo on the SSH host.** The backend only needs the
-   `backend/` directory; the frontend tree can be ignored on this box if
-   you prefer.
-   ```bash
-   git clone <repo-url> edges-interface
-   cd edges-interface
-   ```
-
-2. **Create the conda env (one-time).**
-   ```bash
-   conda create -n edges python=3.11 -c conda-forge \
-       edges-analysis edges-io pygsdata read-acq astropy
-   conda activate edges
-   pip install -r backend/requirements.txt
-   ```
-
-3. **Point the env vars at the cluster paths.** Add these to your
-   `~/.bashrc` (or set them in the systemd unit / launch script — see
-   below):
-   ```bash
-   export EDGES_RAW_DATA_ROOT=/data5/edges/data/EDGES3_data/MRO
-   export EDGES_OUTPUT_ROOT=/data5/edges/edges_outputs
-   export EDGES_TEMP_LOG_DIR=/data5/edges/data/EDGES3_data/MRO/temperature_logger
-   export EDGES_DAEMON_ENABLED=1
-   export EDGES_DAEMON_HOUR=2
-   ```
-   `config.py::_default_raw_root()` already picks `/data5/...` if
-   `EDGES_RAW_DATA_ROOT` is unset *and* that path exists, so step 3 is
-   technically optional — but being explicit is safer.
-
-4. **Start the backend** so it listens on a public interface (NOT
-   `127.0.0.1` — that's loopback only and won't accept external
-   connections):
-   ```bash
-   conda activate edges
-   cd edges-interface
-   python -m uvicorn backend.backend_api:app --host 0.0.0.0 --port 8000
-   ```
-   The `--host 0.0.0.0` change is the **only** command-line flag
-   difference from local dev.
-
-5. **Build the frontend bundle on any host with Node** (could be your
-   laptop, not the SSH machine):
-   ```bash
-   cd frontend
-   npm install
-   VITE_API_URL=https://edges.example.com npm run build
-   ```
-   The resulting `frontend/dist/` is a fully static bundle. Upload it
-   to any static host (nginx on the same SSH box, GitHub Pages, S3 +
-   CloudFront, …). It needs to be reachable by the user's browser.
-
-6. **CORS is already permissive** (`allow_origins=["*"]` in
-   `backend/backend_api.py`) so no extra headers are needed even when
-   the frontend and backend live on different origins.
-
-7. **(Recommended, not required) Put HTTPS in front.** Browsers won't
-   load `http://` resources from an `https://` page. Either:
-   * Terminate TLS at a reverse proxy (nginx, Caddy, traefik) in front
-     of uvicorn on port 8000, and have the frontend talk to
-     `https://edges.example.com`. Set `VITE_API_URL=https://...` at
-     build time.
-   * Or use a tunnel / cloudflare / etc.
-
-#### Daemon on SSH (the easy way vs the robust way)
-
-The backend has an **in-process scheduler** that fires
-`run_single_day.py` once a day at `EDGES_DAEMON_HOUR`. It's fine for
-local dev and for a single-user SSH install. For a long-running
-production deployment on SSH use **systemd** — ready-made unit files
-live in `scripts/systemd/`:
-
-```text
-scripts/
-├── edges-pipeline.sh                # wrapper: scan dates + invoke run_single_day.py
-└── systemd/
-    ├── README.md                    # full install walkthrough
-    ├── edges-api.service            # Option A: long-running uvicorn
-    ├── edges-pipeline.service       # Option B part 1: oneshot daily run
-    └── edges-pipeline.timer         # Option B part 2: calendar trigger
-```
-
-**Option A — long-running uvicorn (simpler):** drop in
-`edges-api.service` and `systemctl enable --now edges-api.service`.
-The in-process scheduler runs inside uvicorn at `EDGES_DAEMON_HOUR`
-UTC every day. Set `EDGES_DAEMON_ENABLED=1` in the unit file.
-
-**Option B — systemd timer (more robust):** drop in both
-`edges-pipeline.service` and `edges-pipeline.timer`. The timer
-triggers the oneshot service once per day, which in turn runs
-`edges-pipeline.sh` (scans the raw tree for the latest dates, then
-calls `run_single_day.py --source=daemon`). Set
-`EDGES_DAEMON_ENABLED=0` in `edges-api.service` so the pipeline
-doesn't run twice. Recommended for production because:
-
-* No Python process holding memory 24/7.
-* `Persistent=true` catches missed runs after power outages.
-* Clean separation between the API and the analysis job.
-* Each job is a single `oneshot` whose success/failure is visible
-  in `systemctl list-jobs` and `journalctl -u edges-pipeline`.
-
-**Install in one block:**
-
-```bash
-sudo useradd --system --home /opt/edges-interface --shell /bin/bash edges
-sudo mkdir -p /opt/edges-interface && sudo chown edges:edges /opt/edges-interface
-sudo -u edges git clone <repo-url> /opt/edges-interface
-sudo -u edges conda create -n edges python=3.11 -c conda-forge \
-    edges-analysis edges-io pygsdata read-acq astropy
-sudo -u edges bash -c 'source activate edges && pip install -r /opt/edges-interface/backend/requirements.txt'
-sudo chown -R edges:edges /data5/edges/edges_outputs
-
-sudo cp scripts/systemd/edges-api.service       /etc/systemd/system/
-sudo cp scripts/systemd/edges-pipeline.service  /etc/systemd/system/   # Option B only
-sudo cp scripts/systemd/edges-pipeline.timer    /etc/systemd/system/   # Option B only
-sudo cp scripts/edges-pipeline.sh               /opt/edges-interface/scripts/
-sudo chmod +x                                    /opt/edges-interface/scripts/edges-pipeline.sh
-
-# Edit /etc/systemd/system/edges-api.service to set your raw/output paths.
-sudo systemctl daemon-reload
-sudo systemctl enable --now edges-api.service
-sudo systemctl enable --now edges-pipeline.timer      # Option B only
-```
-
-**Useful commands:**
-
-```bash
-sudo systemctl status edges-api.service
-sudo systemctl status edges-pipeline.timer
-sudo systemctl list-timers --all | grep edges
-sudo journalctl -u edges-api.service -f
-sudo journalctl -u edges-pipeline.service -f
-sudo systemctl start edges-pipeline.service       # manually trigger today's run
-```
-
-Override defaults via `/etc/default/edges-pipeline` (read by the
-wrapper script):
-
-```bash
-EDGES_RAW_DATA_ROOT=/data5/edges/data/EDGES3_data/MRO
-EDGES_OUTPUT_ROOT=/data5/edges/edges_outputs
-EDGES_TEMP_LOG_DIR=/data5/edges/data/EDGES3_data/MRO/temperature_logger
-EDGES_PYTHON=/opt/anaconda3/envs/edges/bin/python
-```
-
-#### Firewall / ports
-
-The backend listens on **TCP 8000** by default. On the ASU enterprise
-cluster this typically needs to go through a reverse proxy; talk to
-your sysadmin if `curl http://<host>:8000/latest_run` works from your
-laptop. The frontend has **no** listening port of its own — it's a
-static bundle.
+| `VITE_API_URL` | `http://127.0.0.1:8000` | Base URL the frontend uses for `/manifest.json`, `/latest_run`, `/save_outputs`, and the static-file mount. Vite inlines it at build time. **For dev (`npm run dev`), leave it unset** — Vite proxies to `localhost:8000` automatically. |
 
 ---
 
-## SSH checklist — what you actually have to change
+## What gets written under `outputs/`
 
-If the project is working on your local machine, getting it onto SSH
-should be **path + host changes only** — no code edits. Here's the
-checklist:
+This is **runtime state** and is excluded from git (see `.gitignore`).
+If you blow it away, the next user run will rebuild it from scratch.
 
-| Local default | SSH replacement | Where to change |
-|---|---|---|
-| `EDGES_RAW_DATA_ROOT=/Users/joshualewis/EdgesTestData/data5/edges/data/EDGES3_data/MRO` | `/data5/edges/data/EDGES3_data/MRO` (or wherever the cluster MRO data lives) | env var, or edit `_default_raw_root()` in `backend/config.py` |
-| `EDGES_OUTPUT_ROOT=/Users/joshualewis/EdgesTestData/outputs` | `/data5/edges/edges_outputs` (or any writable scratch path on the cluster) | env var, or `_default_output_root()` |
-| `EDGES_TEMP_LOG_DIR=...temperature_logger` | same path, just relocated | env var (defaults from `RAW_DATA_ROOT`) |
-| uvicorn `--host 127.0.0.1` | `--host 0.0.0.0` so external hosts can reach it | uvicorn command line |
-| Frontend `VITE_API_URL` unset (defaults to `http://127.0.0.1:8000`) | `VITE_API_URL=https://edges.example.com` (or whatever the backend's public URL is) | env var at `npm run build` time |
-| conda env auto-detected as `/opt/anaconda3/envs/edges` | whatever the SSH path is (e.g. `$HOME/anaconda3/envs/edges/bin/python`) | usually picked up automatically; set `EDGES_PYTHON` if not |
-| None | systemd unit / cron job for the daemon (recommended) | new file on SSH |
+```
+outputs/
+├── manifest.json             # Latest manifest (mirrors runs/<run_id>/manifest.json)
+├── latest_run.json           # {source, run_id, dates, generated_at, parameters, has_2d, …}
+├── available_dates.json      # Scanned by scan_dates.py on backend startup
+├── runs/<run_id>/            # One folder per user-triggered run
+│   ├── calibration/
+│   ├── calibration_s11/
+│   ├── calibration_spectra/
+│   ├── calibration_coefficients/   # scale/offset/unc/cos/sin TNW + scale_temperature/offset_temperature
+│   ├── calibration_temperatures/   # noise-wave fit values per load (ambient/hot/open/short)
+│   ├── calibrated_temperature/     # Tcal = a*Q + b from specal.txt
+│   ├── average_temperature/        # time-averaged Tuncal (Dicke only)
+│   ├── antenna_s11/
+│   ├── raw_spectra/  raw_waterfalls/
+│   └── actual_temperature/         # probe readings at each cal time
+├── user_cache/<hash>/        # Snapshot of the last few user runs, keyed by parameter hash
+├── saved/                    # ZIP archives produced by the Save button in the UI
+└── run_history/<hash>.json   # Marker that the latest human run uses run_hash X
+```
 
-Everything else — CORS, all imports, file I/O, the React build — is
-identical between local and SSH.
+---
+
+## Pipeline steps (what `run_single_day.py` does, top to bottom)
+
+For a given `(cal_date, s11_date, spec_date)` triple the pipeline runs:
+
+1. Load the four `.acq` calibration files (amb / hot / open / short) and
+   the antenna `.acq`.
+2. Merge every `*.log` / `*.backup` / `*.txt` in
+   `EDGES_TEMP_LOG_DIR` into one timeline of probe readings.
+3. Look up the calibration temperatures:
+   * Primary: the `.tmp` snapshot file written at the moment of the
+     cal/obs (e.g. `2026_227_05_amb.tmp`).
+   * Fallback: nearest-in-time reading in the merged temperature log.
+   * Final fallback: the internal default constants.
+4. Run the EDGES receiver calibration
+   (`alancal_edges3`) — writes `calibration/specal.txt` and
+   `calibration/s11_modelled.txt`.
+5. Save the noise-wave coefficients
+   (`scale`, `offset`, `unc`, `cos`, `sin`) and the linear-frontend
+   coefficients (`scale_temperature`, `offset_temperature`) as
+   `calibration_coefficients/<date>_<coeff>.npz`.
+6. Save the per-frequency temperatures the noise-wave model fit against
+   each load (`calibration_temperatures/<date>_{ambient,hot,open,short}.npz`).
+7. Save the raw antenna spectra (`raw_spectra/<spec_date>_{P0,P1,P2,Q}.npz`)
+   and time-averaged + 2D waterfall plots.
+8. Run the Dicke switching step, then the linear frontend
+   calibration `Tcal = a*Q + b` (where `a` and `b` come from
+   `specal.txt` via `calobs.calibrate_approximate_temperature`):
+   * `calibrated_temperature/<spec_date>_cal_temp.npz` — time-averaged
+     `Tcal` over 40–190 MHz.
+   * `average_temperature/<spec_date>_avg_temp.npz` — time-averaged
+     uncalibrated temperature (Tuncal, the Dicke-only result).
+   * `calibrated_waterfalls/<spec_date>_calibrated.jpg` — 2D waterfall
+     plot of `Tcal` over LST.
+9. Save the antenna S11 measurement (`antenna_s11/<s11_date>_antenna_S11.npz`).
+10. Save per-load actual probe readings
+    (`actual_temperature/<spec_date>_{ambient,hot}_actual_temp.npz`).
+11. Write `manifest.json` describing every plot above.
+
+---
+
+## Development workflow
+
+### Running the pipeline manually
+
+```bash
+cd backend
+EDGES_RAW_DATA_ROOT=/path/to/mro \
+EDGES_OUTPUT_ROOT=/path/to/outputs \
+python run_single_day.py \
+    --cal-date 2026_227 --s11-date 2026_242_23 --spec-date 2026_244_22_24_54 \
+    --source user
+```
+
+Run with `--help` to see every tunable (`cterms`, `wterms`,
+`fstart`/`fstop`, `wfstart`/`wfstop`, `save_2d_npz`, `--run-hash`, …).
+
+### Triggering the pipeline from the UI
+
+* Click **Run with these dates** on the Select page (`POST /run_pipeline`).
+
+### Dedup behaviour
+
+User runs are deduped by a hash of `(cal-date, s11-date, spec-date,
+cterms, wterms, fstart, fstop, wfstart, wfstop, save_2d_npz)`.
+Re-running with the same parameters reuses the previous run's
+`runs/<run_id>/` directory and just bumps `latest_run.json`. The hash is
+also recorded in `run_history/<hash>.json` so the UI can re-link the
+latest human run back to its manifest after a refresh.
 
 ---
 
@@ -319,135 +295,40 @@ identical between local and SSH.
 **This repo contains code only.** The raw MRO data (`.acq` files,
 temperature logs) is large, environment-specific, and never committed.
 
-On the macOS dev box the raw tree happens to sit one directory above
-the repo at `/Users/joshualewis/EdgesTestData/data5/edges/data/EDGES3_data/MRO`
-(it is **NOT** inside `EdgesTestData/`). On the ASU cluster it sits
-on the shared filesystem at `/data5/edges/data/EDGES3_data/MRO`.
-Either way, the backend reaches it via a single env var:
+On the cluster the raw tree lives at
+`/data5/edges/data/EDGES3_data/MRO`. The backend reaches it via the
+`EDGES_RAW_DATA_ROOT` env var; the default already points there, so
+just set it if your mount is in a non-standard place:
 
 ```bash
 export EDGES_RAW_DATA_ROOT=/the/place/where/the/raw/data/lives
 ```
 
-`backend/config.py::_default_raw_root()` already tries these common
-locations in order:
+`.gitignore` defensively excludes `/data5/`, `/data/`, `/raw/`, `/mro/`,
+`/acq/`, and `*.acq` so the raw tree can't be accidentally committed.
 
-1. `/Users/joshualewis/EdgesTestData/data5/edges/data/EDGES3_data/MRO` (mac dev)
-2. `/data5/edges/data/EDGES3_data/MRO` (ASU cluster)
-3. `/mnt/data5/edges/data/EDGES3_data/MRO`, `/scratch/edges/...`, `~/data5/...` (other)
-
-If none of those exist, set `EDGES_RAW_DATA_ROOT` explicitly and the
-pipeline will pick it up. `.gitignore` defensively excludes `/data5/`,
-`/data/`, `/raw/`, `/mro/`, `/acq/`, and `*.acq` so the raw tree
-can't be accidentally committed.
-
-The pipeline never writes into `RAW_DATA_ROOT`; it is read-only
-input. All generated artefacts (`manifest.json`, plot `.npz` / `.jpg`
-files, daemon trees, saved zips, run history) go to `OUTPUT_ROOT`
-which is separate and gitignored.
+The pipeline never writes into `RAW_DATA_ROOT`; it is read-only input.
+All generated artefacts (`manifest.json`, plot `.npz` / `.jpg` files,
+saved zips, run history) go to `OUTPUT_ROOT` which is separate and
+gitignored.
 
 ---
 
-## Will it work on SSH with only path changes?
+## Troubleshooting
 
-**Yes, with the following caveats.** I audited the codebase specifically
-for local-only assumptions:
-
-| Concern | Status |
-|---|---|
-| Hardcoded `/Users/joshualewis/...` paths | Only inside `_default_raw_root()` / `_default_output_root()` in `backend/config.py`, **and each has a cluster fallback** (`/data5/...`). Set `EDGES_RAW_DATA_ROOT` / `EDGES_OUTPUT_ROOT` explicitly to be safe. |
-| macOS-only behaviour | None. The code uses `pathlib`, no `os.system` with platform branches. |
-| `127.0.0.1` only listens on loopback | Change to `--host 0.0.0.0` (one CLI flag). |
-| HTTP-only frontend default | Browser will block mixed content; build with `VITE_API_URL=https://...` and put TLS in front. |
-| In-process daemon scheduler dies when uvicorn restarts | Use systemd (`Restart=on-failure`) or cron instead. |
-| CORS restricted to localhost | Already permissive (`allow_origins=["*"]`). |
-| Filesystem permissions on `OUTPUT_ROOT` | Make sure the user running uvicorn can write to it. |
-| Frontend reads files directly | No — it goes through the backend's static-file mount at `/`. Works across machines. |
-| Time zone | The pipeline uses UTC throughout (ISO 8601 strings, day-of-year dates). The host's local TZ doesn't affect output. |
-
-If you find anything that doesn't work after pointing it at the cluster
-paths, it's a missing env var or a permission issue, not a code change.
-
----
-
-## What gets written under `OUTPUT_ROOT`
-
-This is **runtime state** and is excluded from git (see `.gitignore`).
-If you blow it away, the next daemon run will rebuild it from scratch.
-
-```
-$EDGES_OUTPUT_ROOT/
-├── manifest.json             # Latest manifest (mirrors daemon/manifest.json or user/manifest.json)
-├── latest_run.json           # {source, run_id, dates, generated_at, parameters, has_2d, ...}
-├── available_dates.json      # Scanned by scan_dates.py on backend startup
-├── daemon/                   # Daily scheduled runs
-│   ├── manifest.json
-│   └── runs/<run_id>/        # One folder per daemon-triggered run
-│       ├── calibration/
-│       ├── calibration_s11/
-│       ├── calibration_spectra/
-│       ├── calibration_coefficients/
-│       ├── calibration_temperatures/   # noise-wave fit values per load
-│       ├── calibrated_temperature/
-│       ├── average_temperature/
-│       ├── antenna_s11/
-│       ├── raw_spectra/  raw_waterfalls/
-│       └── actual_temperature/          # probe readings at each cal time
-├── user/                     # Latest manual user run
-│   ├── manifest.json
-│   └── runs/<run_id>/        # (same layout as daemon/runs/<run_id>)
-├── user_cache/<hash>/        # Snapshot of the last few user runs, keyed by parameter hash
-├── saved/                    # ZIP archives produced by the Save button in the UI
-└── run_history/<hash>.json   # Marker that the latest human run uses run_hash X
-```
-
----
-
-## Development workflow
-
-### Running a pipeline manually
-
-```bash
-conda activate edges
-cd backend
-EDGES_RAW_DATA_ROOT=/path/to/mro \
-EDGES_OUTPUT_ROOT=/path/to/outputs \
-python run_single_day.py \
-    --cal-date 2026_227 --s11-date 2026_242_23 --spec-date 2026_244_22_24_54 \
-    --source daemon
-```
-
-Run with `--help` to see every tunable (cterms, wterms, fstart/fstop,
-wfstart/wfstop, save_2d_npz, --run-hash, …).
-
-### Triggering the pipeline from the UI
-
-* Daily at `EDGES_DAEMON_HOUR` when the daemon is enabled.
-* On demand via the "Run now" button on the home page (`POST /daemon/trigger`).
-
-### Dedup behaviour
-
-Both manual and daemon runs are deduped by a hash of
-`(cal-date, s11-date, spec-date, save_2d_npz, …)`. Re-running with the
-same parameters reuses the previous run's `runs/<run_id>/` directory and
-just bumps `latest_run.json`. The hash is also recorded in
-`run_history/<hash>.json` so the UI can re-link the latest human run
-back to its manifest after a refresh.
-
----
-
-## Deployment notes
-
-* **Conda env**: `edges` (Python 3.11) with `edges-analysis`, `edges-io`,
-  `pygsdata`, `read-acq`, `astropy`. Create with:
-  `conda create -n edges python=3.11 -c conda-forge edges-analysis edges-io pygsdata read-acq astropy`.
-* **Pip deps**: see `backend/requirements.txt`.
-* **Static mount**: the backend mounts `$EDGES_OUTPUT_ROOT` at `/` via
-  FastAPI's `StaticFiles`. This MUST be the last route registered so it
-  doesn't shadow the API endpoints (see the very end of
-  `backend_api.py`).
-* **Port**: backend defaults to `8000`. Frontend dev server defaults to
-  `5173`.
+* **"Pipeline failed (exit 1)" in the UI** — open the terminal running
+  the backend. The full traceback prints to stderr.
+* **`manifest.json` not found** — you haven't run the pipeline yet.
+  Click **Run with these dates** on the Select page.
+* **`e3_beam_factor.hickle` not found** — set
+  `EDGES_BEAM_FACTOR_FILE` to the correct path on your cluster.
+* **Vite can't reach the backend** — make sure you started the
+  backend on `127.0.0.1:8000` *on the same machine as the frontend
+  dev server* (i.e. both running on the cluster, behind the same
+  `ssh -L` tunnel).
+* **Browser shows stale data after a run** — every page refetches on
+  focus, but you can also click the navbar's brand to bounce the app
+  and force a refresh.
 
 ---
 

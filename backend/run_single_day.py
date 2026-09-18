@@ -59,7 +59,7 @@ from edges.alanmode import (  # noqa: E402
 from edges.alanmode.cli import AlanCalOpts, alancal_edges3  # noqa: E402
 from edges.cal.apply import approximate_temperature  # noqa: E402
 from edges.cal.dicke import dicke_calibration  # noqa: E402
-from edges.analysis.calibrate import apply_noise_wave_calibration  # noqa: E402
+from edges.analysis.calibrate import apply_noise_wave_calibration  # noqa: E402  # noqa: F401  (legacy import; the linear frontend cal uses calibrate_approximate_temperature below)
 from edges.cal import ReflectionCoefficient, S11ModelParams, sparams as sp  # noqa: E402
 from edges.frequencies import get_mask  # noqa: E402
 import edges.io as io  # noqa: E402
@@ -71,9 +71,9 @@ import edges.modeling as mdl  # noqa: E402
 # ---------------------------------------------------------------------------
 DEFAULT_CTERMS = 6
 DEFAULT_WTERMS = 5
-DEFAULT_FSTART = 50.0
+DEFAULT_FSTART = 40.0
 DEFAULT_FSTOP = 190.0
-DEFAULT_WFSTART = 50.0
+DEFAULT_WFSTART = 40.0
 DEFAULT_WFSTOP = 190.0
 
 CAL_LOADS = ("amb", "hot", "open", "short")
@@ -908,17 +908,14 @@ def process_single_day(
     _save_freq_y(coeff_dir, f"{cal_date}_unc.npz", cal_freqs_mhz, np.asarray(calobs.Tunc))
     _save_freq_y(coeff_dir, f"{cal_date}_cos.npz", cal_freqs_mhz, np.asarray(calobs.Tcos))
     _save_freq_y(coeff_dir, f"{cal_date}_sin.npz", cal_freqs_mhz, np.asarray(calobs.Tsin))
-    # T0 and T1 — kept as separate semantic files
-    T0 = getattr(calobs, "T0", None)
-    T1 = getattr(calobs, "T1", None)
-    if T0 is None:
-        # Fallback: T0 = offset for stability if backend doesn't expose it
-        T0 = np.asarray(calobs.Toff)
-    if T1 is None:
-        # Fallback: T1 = scale / tns
-        T1 = np.asarray(calobs.Tsca) / tns
-    _save_freq_y(coeff_dir, f"{cal_date}_T0.npz", cal_freqs_mhz, np.asarray(T0))
-    _save_freq_y(coeff_dir, f"{cal_date}_T1.npz", cal_freqs_mhz, np.asarray(T1))
+    # Linear frontend coefficients. EDGES surfaces them as ``Tsca`` /
+    # ``Toff`` (which are ``tns * sca`` and ``tload - ofs`` in specal.txt
+    # notation); some EDGES versions may also expose ``T0``/``T1``
+    # directly, in which case we prefer those.
+    T0 = getattr(calobs, "T0", None) or np.asarray(calobs.Tsca)
+    T1 = getattr(calobs, "T1", None) or np.asarray(calobs.Toff)
+    _save_freq_y(coeff_dir, f"{cal_date}_scale_temperature.npz", cal_freqs_mhz, np.asarray(T0))
+    _save_freq_y(coeff_dir, f"{cal_date}_offset_temperature.npz", cal_freqs_mhz, np.asarray(T1))
 
     # ---- 8. Calibration temperatures derived from the analysis ------------
     # The receiver calibration writes two relevant files:
@@ -953,39 +950,11 @@ def process_single_day(
     else:
         print(f"[run] WARN: {cal_fit_file} not found")
 
-    # LNA noise temperature from specal.txt (column ``Tunc``). The file
-    # uses a token-based format with column labels interleaved with the
-    # values, so we parse it explicitly rather than via genfromtxt.
-    specal_file = calib_dir / "specal.txt"
-    lna_freqs: Optional[np.ndarray] = None
-    lna_temp: Optional[np.ndarray] = None
-    if specal_file.exists():
-        try:
-            rows: List[List[str]] = []
-            with open(specal_file, "r") as fh:
-                for line in fh:
-                    toks = line.strip().split()
-                    if not toks or toks[0] != "freq":
-                        continue
-                    # Tokens: freq F s11lna R I sca S ofs O tlnau T tlnac C tlnas N wtcal W cal_data
-                    rows.append(toks)
-            lna_freqs = np.array([float(r[1]) for r in rows])
-            lna_temp = np.array([float(r[10]) for r in rows])
-            print(f"[run] loaded {specal_file.name}: LNA Tunc range "
-                  f"{lna_temp.min():.2f}..{lna_temp.max():.2f} K")
-        except Exception as exc:
-            print(f"[run] WARN: failed to parse {specal_file}: {exc}")
-    else:
-        print(f"[run] WARN: {specal_file} not found; LNA will fall back to setpoint")
-
     def _save_cal_temp(
         npz_key: str,
         analysis_key: Optional[str],
         fallback_k: float,
     ) -> None:
-        if analysis_key == "lna" and lna_temp is not None and lna_freqs is not None:
-            _save_freq_y(cal_temp_dir, f"{cal_date}_{npz_key}.npz", lna_freqs, lna_temp)
-            return
         if (
             analysis_key is not None
             and analysis_key in cal_fit
@@ -1005,26 +974,44 @@ def process_single_day(
 
     _save_cal_temp("ambient", "ambient", ambient_k)
     _save_cal_temp("hot",     "hot",     hot_k)
-    _save_cal_temp("lna",     "lna",     lna_k)
     _save_cal_temp("open",    "open",    np.nan)
     _save_cal_temp("short",   "short",   np.nan)
 
-    # ---- 9. Dicke + noise-wave calibration ---------------------------------
+    # ---- 9. Dicke + linear frontend calibration ---------------------------
+    # The science output is the calibrated sky temperature. The pipeline
+    # is intentionally simple: Dicke switching gives an uncalibrated
+    # temperature ``Tuncal`` (the per-frequency, per-time antenna power
+    # ratio in K), and the EDGES receiver calibration maps ``Tuncal`` to
+    # the absolute sky temperature ``Tcal`` via the linear formula
+    # ``Tcal = T0 * Tuncal + T1`` whose coefficients (``T0``, ``T1``)
+    # are derived internally by EDGES from ``specal.txt`` and the
+    # antenna S11 (the noise-wave correction is applied there).
+    #
+    # Concretely ``calobs.calibrate_approximate_temperature`` does:
+    #     q = (Tuncal - t_load) / t_load_ns
+    #     Tcal = a * q + b
+    # where ``a`` and ``b`` come from ``specal.txt`` and the antenna
+    # S11 (the noise-wave correction lives in ``b``).
     print("[run] Dicke calibration ...")
     dicke_data = dicke_calibration(raw_data)
     approx_temp = approximate_temperature(dicke_data, tload=tload, tns=tns)
 
-    print("[run] Noise-wave calibration ...")
-    cal_temp = apply_noise_wave_calibration(
-        approx_temp,
-        calibrator=calobs,
-        antenna_s11=ant_s11_model,
-        tload=tload,
-        tns=tns,
+    print("[run] Frontend calibration (EDGES linear) ...")
+    tuncal_2d = approx_temp.data[0, 0]                          # (n_time, n_freq)
+    # Apply the EDGES linear calibration. This handles the freq-grid
+    # interpolation between ``specal.txt`` (40-190 MHz, 3072 bins) and
+    # the observation data (0-200 MHz, 32768 bins) internally.
+    cal_obj = calobs.calibrate_approximate_temperature(
+        np.asarray(approx_temp.data[0, 0]),                     # (n_time, n_freq) ndarray
+        t_load=tload,
+        t_load_ns=tns,
+        ant_s11=ant_s11_model.s11,
+        freqs=approx_temp.freqs,
     )
+    cal_2d = np.asarray(cal_obj.value)                          # (n_time, n_freq)
 
-    avg_temp_data = np.nanmean(approx_temp.data[0, 0], axis=0)
-    cal_temp_data = np.nanmean(cal_temp.data[0, 0], axis=0)
+    avg_temp_data = np.nanmean(tuncal_2d, axis=0)             # time-averaged Tuncal
+    cal_temp_data = np.nanmean(cal_2d, axis=0)                # time-averaged Tcal
     _save_freq_y(
         run_dir / "average_temperature", f"{spec_date}_avg_temp.npz",
         data_freqs_mhz, avg_temp_data,
@@ -1034,16 +1021,16 @@ def process_single_day(
         data_freqs_mhz, cal_temp_data,
     )
 
-    calibrated_lsts = cal_temp.lsts.to_value("hourangle").flatten()
+    calibrated_lsts = approx_temp.lsts.to_value("hourangle").flatten()
     save_waterfall_jpeg(
-        cal_temp.data[0, 0], data_freqs_mhz, calibrated_lsts,
+        cal_2d, data_freqs_mhz, calibrated_lsts,
         run_dir / "calibrated_waterfalls", f"{spec_date}_calibrated.jpg",
         title=f"Calibrated temperature {spec_date}",
     )
     if save_2d_npz:
         save_heatmap_npz(
             run_dir / "calibrated_waterfalls", f"{spec_date}_calibrated_2d.npz",
-            x=data_freqs_mhz, y=calibrated_lsts, z=cal_temp.data[0, 0],
+            x=data_freqs_mhz, y=calibrated_lsts, z=cal_2d,
         )
 
     # ---- 10. Antenna S11 in its own folder --------------------------------
@@ -1120,8 +1107,14 @@ def process_single_day(
     PER_LOAD_CALIBRATION: List[Tuple[str, Optional[str], str, float]] = [
         ("ambient", "amb",  "amb",  config.PROBE_AMBIENT),    # ambient cal @ cal_time, probe AMBIENT
         ("hot",     "hot",  "hot",  config.PROBE_HOT),        # hot cal     @ cal_time, probe HOT
-        ("lna",     None,   "ant", config.PROBE_LNA),        # obs time    @ obs_time, probe LNA
     ]
+
+
+# LNA cold-plate temperature is no longer visualized. The linear
+# T0*Tuncal+T1 frontend calibration reads ``T0`` and ``T1`` directly from
+# ``specal.txt`` (``calobs.T0``/``calobs.T1``), so the "LNA noise-wave
+# fit vs ambient probe" comparison plot that lived here previously has
+# been removed.
     per_load_meta: Dict[str, Dict[str, Any]] = {}
     for display_name, cal_key, snapshot_load, probe in PER_LOAD_CALIBRATION:
         load_time: Optional[datetime] = None
@@ -1200,15 +1193,15 @@ def process_single_day(
                 title=f"{load.capitalize()} Calibration Waterfall  (Frequency [MHz] vs LST [hr])",
                 filePath=rel("calibration_spectra", f"{cal_date}_{load}_2d.npz"),
             ))
-    for coeff in ("scale", "offset", "unc", "cos", "sin", "T0", "T1"):
+    for coeff in ("scale", "offset", "unc", "cos", "sin", "scale_temperature", "offset_temperature"):
         title_map = {
             "scale": "Scale TNW  [K]",
             "offset": "Offset TNW  [K]",
             "unc": "Unc TNW  [K]",
             "cos": "Cos TNW  [K]",
             "sin": "Sin TNW  [K]",
-            "T0": "T0  [K]",
-            "T1": "T1  [K]",
+            "scale_temperature": "Scale temperature  [K]",
+            "offset_temperature": "Offset temperature  [K]",
         }
         plots.append(Plot(
             page=PAGE_CALIBRATION, id=coeff, type="single",
@@ -1218,26 +1211,21 @@ def process_single_day(
             axisx="Frequency [MHz]",
             axisy="Temperature [K]",
         ))
-    for load in ("ambient", "hot", "lna"):
+    # Calibration temperature comparison plots: only ambient and hot (not
+    # the LNA noise temperature — that visualization was retired). These
+    # compare the noise-wave fit (i.e. the per-frequency temperature the
+    # receiver sees against the known load) to the on-site temperature-
+    # log probe reading at the same moment.
+    for load in ("ambient", "hot"):
         meta = per_load_meta.get(load, {})
         meta_time = meta.get("time")
         meta_temp = meta.get("temperature_k")
-        # ``calibration_temperatures/{date}_{load}.npz`` holds the value
-        # the noise-wave model fit against amb/hot/open/short spectra +
-        # LNA S11 produced for this load. For ambient/hot it's the
-        # physically expected load temperature; for lna it's the LNA's
-        # noise temperature. ``actual_temperature/..._{load}_actual_temp.npz``
-        # is the on-site temperature-log probe reading at the matching
-        # time.
         if load == "ambient":
             title = "Ambient Calibration: Noise-wave Fit vs Ambient Probe  [K]"
             label1, label2 = "Noise-wave fit (load temp) [K]", "Ambient probe (probe 100) [K]"
-        elif load == "hot":
+        else:  # hot
             title = "Hot Calibration: Noise-wave Fit vs Hot-Load Probe  [K]"
             label1, label2 = "Noise-wave fit (load temp) [K]", "Hot-load probe (probe 102) [K]"
-        else:  # lna
-            title = "LNA Calibration: Noise-wave Fit (Tunc) vs Ambient Probe  [K]"
-            label1, label2 = "Noise-wave fit (LNA Tunc) [K]", "Ambient probe (probe 100) [K]"
         plots.append(Plot(
             page=PAGE_CALIBRATION, id=f"{load}_vs_actual", type="multi",
             title=title,
@@ -1294,7 +1282,7 @@ def process_single_day(
             ))
     plots.append(Plot(
         page=PAGE_RAW, id="avg_temp", type="single",
-        title="Average Temperature  [K]",
+        title="Average uncalibrated temperature  [K]",
         filePath=rel("average_temperature", f"{spec_date}_avg_temp.npz"),
         xKey="x", yKey="y",
         axisx="Frequency [MHz]",

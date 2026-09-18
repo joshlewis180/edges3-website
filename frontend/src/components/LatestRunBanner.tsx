@@ -1,6 +1,6 @@
 /**
  * Page header shown above every data page. Displays:
- *   * which pipeline produced the current data (daemon / user)
+ *   * whether a run has been completed yet
  *   * the dates that were used
  *   * the generated-at timestamp
  *   * the save controls (2D checkbox + Save button + result)
@@ -18,11 +18,10 @@ type BannerProps = {
   pageTitle?: string
 }
 
-const LOAD_ORDER = ["ambient", "hot", "lna"] as const
+const LOAD_ORDER = ["ambient", "hot"] as const
 const LOAD_LABELS: Record<(typeof LOAD_ORDER)[number], string> = {
   ambient: "Ambient",
   hot: "Hot",
-  lna: "LNA",
 }
 
 function formatTime(iso: string | null | undefined): string {
@@ -41,11 +40,9 @@ export default function LatestRunBanner({ pageTitle }: BannerProps) {
   const [message, setMessage] = useState<string | null>(null)
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null)
 
-  const sourceLabel = latest.source
-    ? latest.source === "daemon"
-      ? "Daily daemon run"
-      : "Custom user run"
-    : "No data yet"
+  const sourceLabel = latest.run_id
+  ? "Latest user run"
+  : "Run has not been completed"
 
   const dateLine = [
     latest.dates.cal && `cal: ${latest.dates.cal}`,

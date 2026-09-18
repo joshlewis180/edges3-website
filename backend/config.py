@@ -1,25 +1,31 @@
 """
 Central configuration for the EDGES-3 web interface.
 
-All paths are environment-driven so that the same code runs:
-  * Locally on macOS / Linux
-  * On the ASU enterprise cluster
+All paths are environment-driven so the same code runs:
+  * On the SSH cluster (default paths under /data5/... and the repo)
+  * Anywhere else (env-var overrides)
 
-Environment variables (all optional, with sensible defaults for local dev):
-  EDGES_RAW_DATA_ROOT       Raw MRO data root (default: local test root)
-  EDGES_OUTPUT_ROOT         Where outputs and the manifest live
+Environment variables (all optional):
+
+  EDGES_RAW_DATA_ROOT       Raw MRO data root. Default: /data5/edges/data/EDGES3_data/MRO
+  EDGES_OUTPUT_ROOT         Where outputs and the manifest live.
+                             Default: <repo>/outputs
   EDGES_TEMP_LOG_FILE       Path to a specific temperature.log (legacy)
-  EDGES_TEMP_LOG_DIR        Directory containing one or more temperature log files;
-                             every ``*.log`` (plus ``*.backup`` and ``*.txt``)
-                             in this directory is read. Defaults to the parent
-                             directory of ``EDGES_TEMP_LOG_FILE``.
+  EDGES_TEMP_LOG_DIR        Directory containing one or more temperature log
+                             files; every ``*.log`` (plus ``*.backup`` and
+                             ``*.txt``) in this directory is read and merged
+                             into one timeline.
   EDGES_BEAM_FACTOR_FILE    Path to the EDGES-3 antenna beam factor file
                              (``e3_beam_factor.hickle``). Required for the
-                             absolute temperature calibration; location
-                             differs between local dev and the SSH cluster.
-  EDGES_PYTHON              Python interpreter to use (default: current 'python')
-  EDGES_DAEMON_HOUR         Hour of day (0-23) to run the daily daemon (default: 2)
-  EDGES_DAEMON_ENABLED      "1"/"true" to enable the in-process scheduler
+                             absolute temperature calibration.
+  EDGES_PROBE_AMBIENT       Temperature-log probe for ambient cal (default 100)
+  EDGES_PROBE_HOT           Temperature-log probe for hot cal     (default 102)
+  EDGES_PROBE_LNA           Temperature-log probe for LNA / cable (default 100)
+  EDGES_PROBE_COLD_LOAD     Temperature-log probe for cold load  (default 152)
+
+The pipeline is user-triggered only — there is no daemon, no scheduler,
+no systemd unit. The backend runs under ``uvicorn`` and the frontend is
+served by Vite (dev) or the built ``dist/`` (prod).
 """
 
 from __future__ import annotations
@@ -31,39 +37,19 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
+# Repo root: <repo>/  (this file is backend/config.py)
+# ---------------------------------------------------------------------------
+REPO_ROOT: Path = Path(__file__).resolve().parent.parent
+
+
+# ---------------------------------------------------------------------------
 # Raw data
 # ---------------------------------------------------------------------------
-def _default_raw_root() -> Path:
-    """Pick a sensible default for whichever machine we are on.
-
-    The raw data is NEVER part of this repository — it lives somewhere
-    else on the filesystem. We try a couple of common locations and
-    fall back to the local path even if it doesn't exist, so downstream
-    code can raise a clear error.
-    """
-    # Local mac test setup
-    local = Path("/Users/joshualewis/EdgesTestData/data5/edges/data/EDGES3_data/MRO")
-    if local.exists():
-        return local
-    # Enterprise cluster
-    cluster = Path("/data5/edges/data/EDGES3_data/MRO")
-    if cluster.exists():
-        return cluster
-    # Linux dev box — anything the user mounts
-    for guess in (
-        Path("/mnt/data5/edges/data/EDGES3_data/MRO"),
-        Path("/scratch/edges/data/EDGES3_data/MRO"),
-        Path.home() / "data5/edges/data/EDGES3_data/MRO",
-    ):
-        if guess.exists():
-            return guess
-    # Fall back to the local path even if it doesn't exist; let downstream code
-    # raise a clear error.
-    return local
-
-
 RAW_DATA_ROOT: Path = Path(
-    os.environ.get("EDGES_RAW_DATA_ROOT", str(_default_raw_root()))
+    os.environ.get(
+        "EDGES_RAW_DATA_ROOT",
+        "/data5/edges/data/EDGES3_data/MRO",
+    )
 ).expanduser().resolve()
 
 TEMPERATURE_LOG_FILE: Path = Path(
@@ -73,10 +59,9 @@ TEMPERATURE_LOG_FILE: Path = Path(
     )
 ).expanduser().resolve()
 
-# Directory containing one or more temperature logs. Every ``*.log`` file in
-# this directory is read, so multiple log files (one per session, day, or
-# sensor) all contribute to the lookup. Defaults to the parent directory of
-# ``TEMPERATURE_LOG_FILE`` so the legacy single-file layout still works.
+# Directory containing one or more temperature logs. Every ``*.log`` file
+# in this directory is read, so multiple log files (one per session, day,
+# or sensor) all contribute to the lookup.
 TEMPERATURE_LOG_DIR: Path = Path(
     os.environ.get(
         "EDGES_TEMP_LOG_DIR",
@@ -88,33 +73,22 @@ TEMPERATURE_LOG_DIR: Path = Path(
 # ---------------------------------------------------------------------------
 # Beam factor file
 # ---------------------------------------------------------------------------
-# The EDGES-3 antenna beam factor lives in a single ``.hickle`` file that
-# is read by the absolute calibration. The on-disk location differs
-# between local mac dev and the SSH cluster, so it is env-driven. We
-# default to a sibling of RAW_DATA_ROOT's parent (the `edges/` directory)
-# and fall back to common cluster locations.
 def _default_beam_factor_file() -> Path:
     """Pick a sensible default for whichever machine we are on.
 
     The beam factor lives in the ``edges/`` directory that is the
-    great-grandparent of ``temperature.log``
-    (``data5/edges/data/EDGES3_data/MRO/temperature_logger/temperature.log``
+    great-grandparent of ``temperature.log`` (``data5/edges/data/EDGES3_data/MRO/temperature_logger/temperature.log``
     → great-grandparent is ``data5/edges/``). Tries, in order:
 
       1. Great-grandparent of the live ``temperature.log``
-      2. The cluster mount point
-      3. Linux dev mounts
-      4. ``$HOME/edges/...``
+      2. Linux dev mounts (``/mnt/...``, ``/scratch/...``)
+      3. ``$HOME/edges/...``
     """
-    # 1. walk up 4 levels from temperature.log:  log → temperature_logger/ → MRO/ → EDGES3_data/ → data/ → edges/
-    sibling = TEMPERATURE_LOG_FILE.parents[4] / "e3_beam_factor.hickle"
+    # 1. great-grandparent of temperature_logger/ (the edges/ dir)
+    sibling = TEMPERATURE_LOG_FILE.parent.parent.parent.parent / "e3_beam_factor.hickle"
     if sibling.exists():
         return sibling
-    # 2. enterprise cluster
-    cluster = Path("/data5/edges/e3_beam_factor.hickle")
-    if cluster.exists():
-        return cluster
-    # 3. linux dev mounts
+    # 2. linux dev mounts
     for guess in (
         Path("/mnt/data5/edges/e3_beam_factor.hickle"),
         Path("/scratch/edges/e3_beam_factor.hickle"),
@@ -131,25 +105,19 @@ BEAM_FACTOR_FILE: Path = Path(
 
 
 # ---------------------------------------------------------------------------
-# Outputs
+# Outputs (default: <repo>/outputs)
 # ---------------------------------------------------------------------------
-def _default_output_root() -> Path:
-    """Pick a sensible output root for local vs cluster."""
-    if RAW_DATA_ROOT == Path("/data5/edges/data/EDGES3_data/MRO").resolve():
-        # Cluster: write outputs to a project directory
-        return Path("/data5/edges/edges_outputs")
-    return Path("/Users/joshualewis/EdgesTestData/outputs")
-
-
 OUTPUT_ROOT: Path = Path(
-    os.environ.get("EDGES_OUTPUT_ROOT", str(_default_output_root()))
+    os.environ.get(
+        "EDGES_OUTPUT_ROOT",
+        str(REPO_ROOT / "outputs"),
+    )
 ).expanduser().resolve()
 
-# Subdirectories within OUTPUT_ROOT. The daemon owns its own subtree, the user
-# owns theirs. The manifest and latest_run pointer live at the top level.
-DAEMON_DIR: Path = OUTPUT_ROOT / "daemon"
-USER_DIR: Path = OUTPUT_ROOT / "user"
-USER_CACHE_DIR: Path = OUTPUT_ROOT / "user_cache"
+# Subdirectories within OUTPUT_ROOT. Every run lives under ``runs/``;
+# ``saved/`` holds user-saved zips; ``run_history/`` holds dedup markers
+# keyed by parameter hash.
+RUNS_DIR: Path = OUTPUT_ROOT / "runs"
 SAVED_DIR: Path = OUTPUT_ROOT / "saved"
 RUN_HISTORY_DIR: Path = OUTPUT_ROOT / "run_history"
 
@@ -165,7 +133,6 @@ SCRIPTS_DIR: Path = Path(__file__).resolve().parent
 
 RUN_SCRIPT: Path = SCRIPTS_DIR / "run_single_day.py"
 SCAN_SCRIPT: Path = SCRIPTS_DIR / "scan_dates.py"
-DAEMON_SCRIPT: Path = SCRIPTS_DIR / "daemon.py"
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +141,7 @@ DAEMON_SCRIPT: Path = SCRIPTS_DIR / "daemon.py"
 def _detect_python() -> str:
     """Prefer ``EDGES_PYTHON`` if set, then the current interpreter
     (``sys.executable``), then any ``python`` on PATH. The current
-    interpreter wins over PATH lookups so that an active conda env is
+    interpreter wins over PATH lookups so an active uv venv is
     preserved across subprocess invocations.
     """
     candidates = [
@@ -189,15 +156,6 @@ def _detect_python() -> str:
 
 
 PYTHON: str = _detect_python()
-
-
-# ---------------------------------------------------------------------------
-# Daemon
-# ---------------------------------------------------------------------------
-DAEMON_HOUR: int = int(os.environ.get("EDGES_DAEMON_HOUR", "2"))
-DAEMON_ENABLED: bool = os.environ.get("EDGES_DAEMON_ENABLED", "0").lower() in (
-    "1", "true", "yes"
-)
 
 
 # ---------------------------------------------------------------------------
@@ -226,30 +184,23 @@ TCAB_FALLBACK_K = 306.5
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 def ensure_dirs() -> None:
     """Make sure every output subdirectory exists."""
-    for d in (OUTPUT_ROOT, DAEMON_DIR, USER_DIR, USER_CACHE_DIR, SAVED_DIR, RUN_HISTORY_DIR):
+    for d in (OUTPUT_ROOT, RUNS_DIR, SAVED_DIR, RUN_HISTORY_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 
 def describe() -> str:
     return (
+        f"REPO_ROOT          = {REPO_ROOT}\n"
         f"RAW_DATA_ROOT      = {RAW_DATA_ROOT}\n"
         f"TEMPERATURE_LOG_DIR= {TEMPERATURE_LOG_DIR}\n"
         f"TEMPERATURE_LOG    = {TEMPERATURE_LOG_FILE}\n"
         f"BEAM_FACTOR_FILE   = {BEAM_FACTOR_FILE}\n"
         f"OUTPUT_ROOT        = {OUTPUT_ROOT}\n"
-        f"DAEMON_DIR         = {DAEMON_DIR}\n"
-        f"USER_DIR           = {USER_DIR}\n"
+        f"RUNS_DIR           = {RUNS_DIR}\n"
         f"SAVED_DIR          = {SAVED_DIR}\n"
         f"PYTHON             = {PYTHON}\n"
-        f"DAEMON_HOUR        = {DAEMON_HOUR}\n"
-        f"DAEMON_ENABLED     = {DAEMON_ENABLED}\n"
         f"TCOLD_FALLBACK_K   = {TCOLD_FALLBACK_K} K\n"
         f"THOT_FALLBACK_K    = {THOT_FALLBACK_K} K\n"
         f"TCAB_FALLBACK_K    = {TCAB_FALLBACK_K} K\n"

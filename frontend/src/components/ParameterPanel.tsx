@@ -66,12 +66,13 @@ export default function ParameterPanel({ parameterSet, selectedDates }: Paramete
         />
       ))}
       <button onClick={handleApply} disabled={isRunning} className="btn btn-primary">
-        {isRunning ? "Running…" : "Apply Parameters"}
+        {isRunning ? "Running…" : "Run with these dates"}
       </button>
       {errorMsg && <div className="text-danger mt-2">{errorMsg}</div>}
       <p className="mt-2 text-muted small">
-        Applying parameters will wipe any previous custom-run outputs and replace them with
-        the new ones.
+        Clicking "Run with these dates" wipes any previous custom-run outputs and
+        replaces them with the new ones. A run with the same dates and parameters
+        as a previous one is reused automatically (no re-computation).
       </p>
     </div>
   )

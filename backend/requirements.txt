@@ -1,22 +1,29 @@
-# FastAPI + pipeline dependencies for the EDGES-3 web backend.
-# Heavy scientific packages (edges-analysis, edges-io, pygsdata, read-acq,
-# astropy) live in the conda environment "edges" and are NOT listed here.
+# Python dependencies for the EDGES-3 web backend.
 #
-# Install:
-#   conda create -n edges python=3.11 -c conda-forge \
-#       edges-analysis edges-io pygsdata read-acq astropy
-#   conda activate edges
-#   pip install -r requirements.txt
+# Install with uv:
+#   uv venv .venv --python 3.11
+#   source .venv/bin/activate
+#   uv pip install -r requirements.txt
+#
+# Every package below is available on PyPI (or via pip from the
+# edges-3 GitHub index) so this file alone is sufficient — no conda
+# environment, no separate system packages.
 
 # Web framework
 fastapi>=0.110
 uvicorn[standard]>=0.27
 pydantic>=2.5
 
-# Numerics + plotting (the conda env supplies numpy/matplotlib; pin
-# minimally so pip-only installs also work)
-numpy>=1.26
-matplotlib>=3.8
+# EDGES scientific stack (the heavy hitters)
+edges-analysis>=8.3
+edges-io>=4.1
+pygsdata>=0.3
+read-acq>=1.2
 
-# The pipeline shell-outs to subprocesses; the ``sh`` module used by
-# edges-analysis is satisfied by the conda env.
+# Numerics + plotting
+numpy>=1.26
+scipy>=1.11
+matplotlib>=3.8
+astropy>=6.0
+h5py>=3.10
+hickle>=5.0

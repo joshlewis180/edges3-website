@@ -1,10 +1,12 @@
 import { useState } from "react"
+import { Link } from "react-router"
 import S11Plotter from "./S11Plotter"
 import SinglePlotter from "./SinglePlotter"
 import MultiPlotter from "./MultiPlotter"
 import HeatmapPlotter from "./HeatmapPlotter"
 import LatestRunBanner from "./LatestRunBanner"
 import { useManifest } from "../hooks/useManifest"
+import { useRunState } from "../state/RunContext"
 import { withBaseUrl } from "../utils/baseURL"
 import type {
   HeatmapPlot,
@@ -22,10 +24,28 @@ type Props = {
 
 export default function ManifestPage({ page, title }: Props) {
   const { manifest, error } = useManifest("/manifest.json")
+  const { latest } = useRunState()
   const [showHeatmaps, setShowHeatmaps] = useState(false)
 
   if (error) return <div className="text-danger p-3">Error loading manifest: {error.message}</div>
   if (!manifest) return <div className="p-3">Loading manifest…</div>
+
+  // If the user hasn't triggered a run yet, show a single friendly
+  // message instead of an empty grid of "no plots" placeholders.
+  if (!latest.run_id) {
+    return (
+      <>
+        <LatestRunBanner pageTitle={title} />
+        <div className="p-3">
+          <p>Run has not been completed.</p>
+          <p>
+            Go to <Link to="/Select">Select</Link>, choose dates and parameters, and click{" "}
+            <strong>Run with these dates</strong>.
+          </p>
+        </div>
+      </>
+    )
+  }
 
   const pagePlots = manifest.plots.filter((p) => p.page === page)
   const hasHeatmaps = pagePlots.some((p) => p.type === "heatmap")
