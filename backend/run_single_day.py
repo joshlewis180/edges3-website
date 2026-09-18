@@ -1178,11 +1178,34 @@ def process_single_day(
     # Actual linear coefficients used by ``calibrate_q``: ``Tcal = q*a + b``.
     # ``a = Tsca / K1`` and ``b = (Toff - (Tunc*K2 + Tcos*K3 + Tsin*K4)) / K1``,
     # where ``K = (K1, K2, K3, K4) = get_K(gamma_rec, gamma_ant)`` depends on
-    # BOTH the receiver S11 and the antenna S11. ``calobs.get_linear_coefficients``
-    # re-evaluates on the specal.txt grid, smoothing the antenna S11 onto
-    # ``calobs.freqs`` if needed.
+    # BOTH the receiver S11 and the antenna S11.
+    #
+    # EDGES's ``Calibrator.get_linear_coefficients`` (calibrator.py:119-122)
+    # checks whether ``ant_s11.freqs`` matches ``calobs.freqs``; if not, it
+    # re-runs the polynomial smoothing on the antenna S11. Our
+    # ``ant_s11_model`` lives on the 32768-point antenna .acq grid, while
+    # ``calobs.freqs`` is the 3072-point specal.txt grid, so EDGES would
+    # re-smooth — and because the raw antenna data has many NaN points, the
+    # re-fit yields NaN everywhere. We avoid that by interpolating the
+    # already-NaN-masked antenna S11 onto the calibration grid ourselves and
+    # passing it as a plain complex numpy array (EDGES's array branch checks
+    # only the length match and uses the values directly).
+    _ant_from_f = ant_s11_model.freqs.to_value("MHz")
+    _ant_to_f = cal_freqs_mhz
+    _src_re = np.real(ant_s11_model.reflection_coefficient)
+    _src_im = np.imag(ant_s11_model.reflection_coefficient)
+    _src_nan = np.isnan(_src_re) | np.isnan(_src_im)
+    _src_re_safe = np.where(_src_nan, 0.0, _src_re)
+    _src_im_safe = np.where(_src_nan, 0.0, _src_im)
+    _out_re = np.interp(_ant_to_f, _ant_from_f, _src_re_safe)
+    _out_im = np.interp(_ant_to_f, _ant_from_f, _src_im_safe)
+    _idx = np.searchsorted(_ant_from_f, _ant_to_f).clip(1, len(_ant_from_f) - 1)
+    _nn_nan = _src_nan[_idx - 1] | _src_nan[_idx]
+    _out_re[_nn_nan] = np.nan
+    _out_im[_nn_nan] = np.nan
+    ant_s11_on_cal = _out_re + 1j * _out_im
     a_q, b_q = calobs.get_linear_coefficients(
-        ant_s11=ant_s11_model, freqs=calobs.freqs
+        ant_s11=ant_s11_on_cal, freqs=calobs.freqs
     )
     _save_freq_y(coeff_dir, f"{cal_date}_a.npz", cal_freqs_mhz, np.asarray(a_q.value))
     _save_freq_y(coeff_dir, f"{cal_date}_b.npz", cal_freqs_mhz, np.asarray(b_q.value))
