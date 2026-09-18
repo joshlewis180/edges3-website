@@ -1298,30 +1298,9 @@ def process_single_day(
     )
     print(f"[run] Manifest written: {manifest_path}")
 
-    # Write the shared provenance marker so future calls can dedup against
-    # this run. The marker is keyed by the parameter hash (or a fallback
-    # derived from the timestamps when the caller didn't pass one).
-    params_for_hash = {
-        "cterms": cterms, "wterms": wterms,
-        "ambient_k": ambient_k, "hot_k": hot_k, "lna_k": lna_k,
-        "fstart": fstart, "fstop": fstop,
-        "wfstart": wfstart, "wfstop": wfstop,
-        "save_2d_npz": bool(save_2d_npz),
-    }
-    h = run_hash or compute_run_hash(dates, params_for_hash)
-    marker = config.RUN_HISTORY_DIR / f"{h}.json"
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    with open(marker, "w") as f:
-        json.dump({
-            "hash": h,
-            "source": source,
-            "run_id": run_dir.name,
-            "dates": dates,
-            "params": params_for_hash,
-            "source_path": str(run_dir),
-            "saved_at": datetime.now().isoformat(),
-        }, f, indent=2)
-    print(f"[run] Provenance marker: {marker}")
+    # The backend API stashes this run into user_cache/ on the next call
+    # (the run_id encodes the parameter hash so dedup is just a directory
+    # lookup). No provenance marker is written here.
     return manifest_path
 
 

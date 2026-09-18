@@ -76,19 +76,27 @@ TEMPERATURE_LOG_DIR: Path = Path(
 def _default_beam_factor_file() -> Path:
     """Pick a sensible default for whichever machine we are on.
 
-    The beam factor lives in the ``edges/`` directory that is the
-    great-grandparent of ``temperature.log`` (``data5/edges/data/EDGES3_data/MRO/temperature_logger/temperature.log``
-    → great-grandparent is ``data5/edges/``). Tries, in order:
+    Tries, in order:
 
-      1. Great-grandparent of the live ``temperature.log``
-      2. Linux dev mounts (``/mnt/...``, ``/scratch/...``)
-      3. ``$HOME/edges/...``
+      1. The canonical edges-3-data-analysis package location
+         (``/data4/vydula/edges/packages/edges3-data-analysis/data/e3_beam_factor.hickle``).
+      2. The great-grandparent of the live ``temperature.log``
+         (e.g. ``data5/edges/e3_beam_factor.hickle``).
+      3. Linux dev mounts (``/mnt/...``, ``/scratch/...``).
+      4. ``$HOME/edges/...``.
     """
-    # 1. great-grandparent of temperature_logger/ (the edges/ dir)
+    # 1. canonical edges-3-data-analysis package location (on the SSH
+    #    cluster the file ships with the edges-3-data-analysis repo)
+    canonical = Path(
+        "/data4/vydula/edges/packages/edges3-data-analysis/data/e3_beam_factor.hickle"
+    )
+    if canonical.exists():
+        return canonical
+    # 2. great-grandparent of temperature_logger/ (the edges/ dir)
     sibling = TEMPERATURE_LOG_FILE.parent.parent.parent.parent / "e3_beam_factor.hickle"
     if sibling.exists():
         return sibling
-    # 2. linux dev mounts
+    # 3. linux dev mounts
     for guess in (
         Path("/mnt/data5/edges/e3_beam_factor.hickle"),
         Path("/scratch/edges/e3_beam_factor.hickle"),
@@ -96,7 +104,7 @@ def _default_beam_factor_file() -> Path:
     ):
         if guess.exists():
             return guess
-    return sibling  # may not exist; downstream code will report a clear error
+    return canonical  # fall through to canonical even if it doesn't exist
 
 
 BEAM_FACTOR_FILE: Path = Path(
@@ -115,11 +123,10 @@ OUTPUT_ROOT: Path = Path(
 ).expanduser().resolve()
 
 # Subdirectories within OUTPUT_ROOT. Every run lives under ``runs/``;
-# ``saved/`` holds user-saved zips; ``run_history/`` holds dedup markers
-# keyed by parameter hash.
+# ``user_cache/`` holds the previous run for dedup; ``saved/`` holds
+# user-saved zips.
 RUNS_DIR: Path = OUTPUT_ROOT / "runs"
 SAVED_DIR: Path = OUTPUT_ROOT / "saved"
-RUN_HISTORY_DIR: Path = OUTPUT_ROOT / "run_history"
 
 MANIFEST_FILE: Path = OUTPUT_ROOT / "manifest.json"
 LATEST_RUN_FILE: Path = OUTPUT_ROOT / "latest_run.json"
@@ -186,7 +193,7 @@ TCAB_FALLBACK_K = 306.5
 # ---------------------------------------------------------------------------
 def ensure_dirs() -> None:
     """Make sure every output subdirectory exists."""
-    for d in (OUTPUT_ROOT, RUNS_DIR, SAVED_DIR, RUN_HISTORY_DIR):
+    for d in (OUTPUT_ROOT, RUNS_DIR, SAVED_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 

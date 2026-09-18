@@ -166,7 +166,7 @@ launching the backend.
 | `EDGES_OUTPUT_ROOT` | `<repo>/outputs` | Where the manifest, runs, saved zips, and run history are written |
 | `EDGES_TEMP_LOG_FILE` | `$EDGES_RAW_DATA_ROOT/temperature_logger/temperature.log` | Single-file temperature log (legacy) |
 | `EDGES_TEMP_LOG_DIR` | `$EDGES_TEMP_LOG_FILE`'s parent | Directory of log files; every `*.log`, `*.backup`, and `*.txt` in here is read and merged into one timeline |
-| `EDGES_BEAM_FACTOR_FILE` | `<RAW_DATA_ROOT>/../../../e3_beam_factor.hickle` (i.e. `data5/edges/e3_beam_factor.hickle`) | Path to the EDGES-3 antenna beam factor file. Required for the absolute temperature calibration; location differs between local dev and the SSH cluster, so set it explicitly there |
+| `EDGES_BEAM_FACTOR_FILE` | `/data4/vydula/edges/packages/edges3-data-analysis/data/e3_beam_factor.hickle` (canonical; falls back to `<RAW_DATA_ROOT>/../../../e3_beam_factor.hickle` then `/mnt/data5/...`, `/scratch/...`, `$HOME/edges/...`) | Path to the EDGES-3 antenna beam factor file. Required for the absolute temperature calibration; the canonical path ships with the `edges-3-data-analysis` package. Set this explicitly only if the file lives somewhere else. |
 | `EDGES_PYTHON` | current interpreter (`sys.executable`) | Python the backend shells out to when running the pipeline |
 | `EDGES_PROBE_AMBIENT` | `100` | Temperature-log probe for ambient cal |
 | `EDGES_PROBE_HOT` | `102` | Temperature-log probe for hot cal |
@@ -212,9 +212,8 @@ outputs/
 │   ├── antenna_s11/
 │   ├── raw_spectra/  raw_waterfalls/
 │   └── actual_temperature/         # probe readings at each cal time
-├── user_cache/<hash>/        # Snapshot of the last few user runs, keyed by parameter hash
-├── saved/                    # ZIP archives produced by the Save button in the UI
-└── run_history/<hash>.json   # Marker that the latest human run uses run_hash X
+├── user_cache/<hash>/        # Snapshot of the previous user run (single entry, evicted on next run)
+└── saved/                    # ZIP archives produced by the Save button in the UI
 ```
 
 ---
@@ -283,10 +282,10 @@ Run with `--help` to see every tunable (`cterms`, `wterms`,
 
 User runs are deduped by a hash of `(cal-date, s11-date, spec-date,
 cterms, wterms, fstart, fstop, wfstart, wfstop, save_2d_npz)`.
-Re-running with the same parameters reuses the previous run's
-`runs/<run_id>/` directory and just bumps `latest_run.json`. The hash is
-also recorded in `run_history/<hash>.json` so the UI can re-link the
-latest human run back to its manifest after a refresh.
+Re-running with the same parameters reuses the previous run's outputs
+from `user_cache/<hash>/` and just bumps `latest_run.json` — no
+recomputation. The cache holds only the immediately previous run (one
+entry); it is evicted on the next run that produces a different hash.
 
 ---
 

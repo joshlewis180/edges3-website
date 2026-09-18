@@ -179,29 +179,27 @@ def _ensure_dates_scanned(force: bool = False) -> Dict[str, List[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Run-history dedup
+# User-cache dedup
 # ---------------------------------------------------------------------------
 # A user-triggered run with the same (dates, parameters) hash as a
 # previous run can be reused — we just copy the prior outputs into a new
-# timestamped directory rather than recomputing. The most-recent user run
-# is preserved here (one entry per hash) so a follow-up click with the
-# same parameters dedups against it.
+# timestamped directory rather than recomputing. Only the immediately
+# previous run is preserved (single-entry cache), so the user never has
+# to think about stale data.
 USER_CACHE_DIR: Path = config.OUTPUT_ROOT / "user_cache"
 
 
 def _wipe_current_outputs() -> int:
     """Delete everything under OUTPUT_ROOT except ``saved/``,
-    ``user_cache/``, ``run_history/``, and ``available_dates.json``.
+    ``user_cache/``, and ``available_dates.json``.
 
-    The keep set preserves the dedup machinery: ``run_history`` markers
-    tell us which runs to reuse, ``user_cache`` stashes the previous
-    run's outputs so a click with the same parameters can dedup against
-    it.
+    ``user_cache`` survives so a follow-up click with the same
+    (dates, parameters) can dedup against the previous run.
     """
     removed = 0
     if not config.OUTPUT_ROOT.exists():
         return 0
-    keep = {"saved", "user_cache", "run_history", "available_dates.json"}
+    keep = {"saved", "user_cache", "available_dates.json"}
     for entry in config.OUTPUT_ROOT.iterdir():
         if entry.name in keep:
             continue
@@ -213,12 +211,13 @@ def _wipe_current_outputs() -> int:
     return removed
 
 
-def _stash_previous_user_run(current_hash: str) -> Optional[str]:
-    """Copy the current ``runs/<run_id>/`` directory into
-    ``user_cache/<previous_hash>/`` so a later identical click can
-    dedup against it.
+def _stash_previous_user_run() -> Optional[str]:
+    """Copy the most recent ``runs/<run_id>/`` directory into
+    ``user_cache/<previous_hash>/`` (single entry, evicts any older
+    entry) so a later identical click can dedup against it.
 
-    Returns the previous hash (or None if there was nothing to stash).
+    The hash is the last ``_``-separated component of the run_id
+    (run_id format: ``user_YYYYMMDD_HHMMSS_<hash16>``).
     """
     runs_root = config.RUNS_DIR
     if not runs_root.exists():
@@ -231,85 +230,34 @@ def _stash_previous_user_run(current_hash: str) -> Optional[str]:
     if not candidates:
         return None
     previous = candidates[0]
-
-    prev_hash: Optional[str] = None
-    for marker in config.RUN_HISTORY_DIR.glob("*.json"):
-        try:
-            with open(marker, "r") as f:
-                meta = json.load(f)
-        except Exception:
-            continue
-        if meta.get("run_id") == previous.name:
-            prev_hash = marker.stem
-            break
-
-    if prev_hash is None:
+    parts = previous.name.split("_")
+    if len(parts) < 4 or len(parts[-1]) != 16:
         return None
+    prev_hash = parts[-1]
 
     USER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    # Single-entry cache: evict any prior entry before stashing the new one.
+    for stale in USER_CACHE_DIR.iterdir():
+        if stale.is_dir():
+            shutil.rmtree(stale, ignore_errors=True)
     target_dir = USER_CACHE_DIR / prev_hash
-    if not target_dir.exists():
-        shutil.copytree(previous, target_dir)
-        src_manifest = config.OUTPUT_ROOT / "manifest.json"
-        if src_manifest.exists():
-            shutil.copy(src_manifest, target_dir / "manifest.json")
-        with open(target_dir / ".cache_meta.json", "w") as f:
-            json.dump({
-                "hash": prev_hash,
-                "original_run_id": previous.name,
-                "stashed_at": datetime.now().isoformat(),
-            }, f, indent=2)
-    _evict_old_cache_entries(_USER_CACHE_CAP)
+    shutil.copytree(previous, target_dir)
+    src_manifest = config.OUTPUT_ROOT / "manifest.json"
+    if src_manifest.exists():
+        shutil.copy(src_manifest, target_dir / "manifest.json")
+    log.info("Stashed previous user run %s -> %s", previous.name, target_dir)
     return prev_hash
 
 
-# Cap on the number of user_cache entries kept on disk.
-_USER_CACHE_CAP = 5
+def _find_existing_run(run_hash: str) -> Optional[Path]:
+    """Look for a previous run with matching hash that can be reused.
 
-
-def _evict_old_cache_entries(cap: int) -> None:
-    """Keep at most ``cap`` entries in ``user_cache``, evicting oldest first."""
-    if not USER_CACHE_DIR.exists():
-        return
-    entries = [p for p in USER_CACHE_DIR.iterdir() if p.is_dir()]
-    if len(entries) <= cap:
-        return
-    entries.sort(key=lambda p: p.stat().st_mtime)
-    for stale in entries[: len(entries) - cap]:
-        shutil.rmtree(stale, ignore_errors=True)
-
-
-def _find_existing_run(
-    run_hash: str,
-    want_2d: bool,
-) -> Optional[Tuple[str, Path, Dict[str, Any]]]:
-    """Look for a previous run with matching hash that can be reused."""
-    marker = config.RUN_HISTORY_DIR / f"{run_hash}.json"
-    if not marker.exists():
-        return None
-    try:
-        with open(marker, "r") as f:
-            meta = json.load(f)
-    except Exception:
-        return None
-
-    recorded_2d = bool(meta.get("params", {}).get("save_2d_npz"))
-    if want_2d != recorded_2d:
-        return None
-
-    candidates: List[Tuple[str, Path]] = []
+    The hash already encodes ``save_2d_npz`` (see ``compute_run_hash``)
+    so two requests with different 2D-ness never match.
+    """
     cached = USER_CACHE_DIR / run_hash
     if cached.exists() and (cached / "manifest.json").exists():
-        candidates.append(("user", cached))
-    src_path = Path(meta.get("source_path", ""))
-    if src_path.exists():
-        candidates.append(("user", src_path))
-
-    for cand_source, cand in candidates:
-        manifest_in_run = cand / "manifest.json"
-        manifest_in_root = cand.parent.parent / "manifest.json"
-        if manifest_in_run.exists() or manifest_in_root.exists():
-            return cand_source, cand, meta
+        return cached
     return None
 
 
@@ -421,16 +369,15 @@ def run_pipeline(
     merged = {**PIPELINE_DEFAULTS, **parameters}
 
     run_hash = compute_run_hash(resolved, merged)
-    want_2d = bool(merged.get("save_2d_npz"))
 
     config.OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 
     # ---- Dedup ----------------------------------------------------------
     if wipe_target_first:
-        _stash_previous_user_run(current_hash=run_hash)
+        _stash_previous_user_run()
         _wipe_current_outputs()
 
-    existing = _find_existing_run(run_hash, want_2d)
+    existing = _find_existing_run(run_hash)
 
     run_id = _build_run_id(run_hash)
     run_dir = config.RUNS_DIR / run_id
@@ -438,10 +385,10 @@ def run_pipeline(
 
     reused_from: Optional[str] = None
     if existing is not None:
-        existing_source, existing_path, _meta = existing
+        existing_path = existing
         log.info(
-            "Reusing existing %s run for hash=%s from %s",
-            existing_source, run_hash, existing_path,
+            "Reusing cached user run for hash=%s from %s",
+            run_hash, existing_path,
         )
         _copy_run_to(existing_path, run_dir)
         old_manifest: Dict[str, Any] = {}
@@ -463,7 +410,7 @@ def run_pipeline(
         new_manifest["dates"] = old_manifest.get("dates", resolved)
         new_manifest["generated_at"] = datetime.now().isoformat()
         new_manifest["reused_from"] = {
-            "source": existing_source,
+            "source": "user",
             "path": str(existing_path),
         }
         new_plot_prefix = f"runs/{run_dir.name}"
@@ -477,22 +424,7 @@ def run_pipeline(
         with open(out_manifest, "w") as f:
             json.dump(new_manifest, f, indent=2)
         log.info("Reused manifest written to %s", out_manifest)
-
-        marker_path = config.RUN_HISTORY_DIR / f"{run_hash}.json"
-        marker_meta: Dict[str, Any] = dict(_meta or {})
-        marker_meta["source"] = "user"
-        marker_meta["run_id"] = run_id
-        marker_meta["source_path"] = str(run_dir)
-        marker_meta["dates"] = resolved
-        marker_meta["params"] = merged
-        marker_meta["saved_at"] = datetime.now().isoformat()
-        marker_meta.pop("hash", None)
-        marker_meta["hash"] = run_hash
-        with open(marker_path, "w") as f:
-            json.dump(marker_meta, f, indent=2)
-        log.info("Re-pointed marker %s -> user run %s", run_hash, run_id)
-
-        reused_from = existing_source
+        reused_from = "user"
     else:
         # ---- Fresh pipeline run -----------------------------------------
         cmd = _build_pipeline_cmd(resolved, merged, config.OUTPUT_ROOT, run_dir, run_hash)
