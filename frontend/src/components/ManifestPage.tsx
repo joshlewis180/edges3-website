@@ -31,7 +31,7 @@ type Props = {
 }
 
 export default function ManifestPage({ page, title }: Props) {
-  const { manifest, error } = useManifest("/manifest.json")
+  const { manifest, error } = useManifest("/data/manifest.json")
   const { latest } = useRunState()
   const [showHeatmaps, setShowHeatmaps] = useState(false)
 

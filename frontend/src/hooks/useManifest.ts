@@ -3,7 +3,7 @@ import type { Manifest } from "../types/manifest"
 import { BASE_URL, withBaseUrl } from "../utils/baseURL"
 import { useRunState } from "../state/RunContext"
 
-export function useManifest(path: string = "/manifest.json") {
+export function useManifest(path: string = "/data/manifest.json") {
   const { refreshKey } = useRunState()
   const [cacheBuster, setCacheBuster] = useState(() => Date.now())
   const url = useMemo(() => {
