@@ -70,6 +70,9 @@ export default function ParameterPanel({ parameterSet, selectedDates }: Paramete
       </button>
       {errorMsg && <div className="text-danger mt-2">{errorMsg}</div>}
       <p className="mt-2 text-muted small">
+        Note: this may take up to a minute to process.
+      </p>
+      <p className="mt-2 text-muted small">
         Clicking "Run with these dates" wipes any previous custom-run outputs and
         replaces them with the new ones. A run with the same dates and parameters
         as a previous one is reused automatically (no re-computation).

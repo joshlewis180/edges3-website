@@ -184,6 +184,40 @@ def save_heatmap_npz(
     return path
 
 
+def save_heatmap_preview_npz(
+    output_dir: Path,
+    filename: str,
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    max_rows: int = 200,
+    max_cols: int = 400,
+) -> Path:
+    """Save a stride-decimated preview of a 2D heatmap for fast browser load.
+
+    The full-resolution npz from :func:`save_heatmap_npz` is ~120 MB for a
+    typical 450×32768 EDGES waterfall. Downloading + parsing + JS downsampling
+    in the browser takes >10 s per plot, freezing the main thread. This
+    companion ``*_preview.npz`` file keeps ~``max_rows`` × ``max_cols`` cells
+    (typically ~1 MB), which Plotly can render immediately. The frontend
+    prefers this file when present and falls back to the full-resolution
+    npz (with on-the-fly decimation) otherwise.
+
+    Decimation picks every ``N``th row/column rather than block-averaging;
+    for visualization that's indistinguishable from averaging and runs in
+    microseconds via numpy slicing.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / filename
+    row_factor = max(1, int(np.ceil(z.shape[0] / max_rows)))
+    col_factor = max(1, int(np.ceil(z.shape[1] / max_cols)))
+    z_small = z[::row_factor, ::col_factor]
+    x_small = np.asarray(x)[::col_factor]
+    y_small = np.asarray(y)[::row_factor]
+    np.savez(path, x=x_small, y=y_small, z=z_small)
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Filename conventions (parse helpers)
 # ---------------------------------------------------------------------------

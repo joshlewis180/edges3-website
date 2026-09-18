@@ -44,6 +44,7 @@ from io_utils import (  # noqa: E402
     parse_yyyy_ddd,
     save_1d_npz,
     save_heatmap_npz,
+    save_heatmap_preview_npz,
     save_waterfall_jpeg,
     write_manifest,
 )
@@ -1131,6 +1132,10 @@ def process_single_day(
                 run_dir / "raw_waterfalls", f"{spec_date}_{name}_2d.npz",
                 x=data_freqs_mhz, y=lsts, z=arr,
             )
+            save_heatmap_preview_npz(
+                run_dir / "raw_waterfalls", f"{spec_date}_{name}_preview.npz",
+                x=data_freqs_mhz, y=lsts, z=arr,
+            )
 
     # ---- 5. Calibration S11s ------------------------------------------------
     print("[run] Saving calibration S11s ...")
@@ -1162,6 +1167,10 @@ def process_single_day(
         if save_2d_npz:
             save_heatmap_npz(
                 run_dir / "calibration_spectra", f"{cal_date}_{load}_2d.npz",
+                x=freqs_cal, y=lsts_cal, z=spec,
+            )
+            save_heatmap_preview_npz(
+                run_dir / "calibration_spectra", f"{cal_date}_{load}_preview.npz",
                 x=freqs_cal, y=lsts_cal, z=spec,
             )
 
@@ -1325,6 +1334,10 @@ def process_single_day(
             run_dir / "calibrated_waterfalls", f"{spec_date}_calibrated_2d.npz",
             x=data_freqs_mhz, y=calibrated_lsts, z=cal_2d,
         )
+        save_heatmap_preview_npz(
+            run_dir / "calibrated_waterfalls", f"{spec_date}_calibrated_preview.npz",
+            x=data_freqs_mhz, y=calibrated_lsts, z=cal_2d,
+        )
 
     # ---- 10. Antenna S11 in its own folder --------------------------------
     _save_freq_realimag(
@@ -1484,7 +1497,7 @@ def process_single_day(
             plots.append(Plot(
                 page=PAGE_CALIBRATION, id=f"{load}_waterfall", type="heatmap",
                 title=f"{load.capitalize()} Calibration Waterfall  (Frequency [MHz] vs LST [hr])",
-                filePath=rel("calibration_spectra", f"{cal_date}_{load}_2d.npz"),
+                filePath=rel("calibration_spectra", f"{cal_date}_{load}_preview.npz"),
             ))
     for coeff in ("scale", "offset", "unc", "cos", "sin", "scale_temperature", "offset_temperature"):
         title_map = {
@@ -1525,7 +1538,7 @@ def process_single_day(
             title = "Ambient Calibration: Noise-wave Fit vs Ambient Probe  [K]"
             label1, label2 = "Noise-wave fit (load temp) [K]", "Ambient probe (probe 100) [K]"
         else:  # hot
-            title = "Hot Calibration: Noise-wave Fit vs Hot-Load Probe  [K]"
+            title = "Hot Calibration: Noise-wave Fit Without Loss Model vs Hot-Load Probe  [K]"
             label1, label2 = "Noise-wave fit (load temp) [K]", "Hot-load probe (probe 102) [K]"
         plots.append(Plot(
             page=PAGE_CALIBRATION, id=f"{load}_vs_actual", type="multi",
@@ -1557,7 +1570,7 @@ def process_single_day(
         plots.append(Plot(
             page=PAGE_CALIBRATED, id="calibrated_waterfall", type="heatmap",
             title="Calibrated Temperature Waterfall  (Frequency [MHz] vs LST [hr])",
-            filePath=rel("calibrated_waterfalls", f"{spec_date}_calibrated_2d.npz"),
+            filePath=rel("calibrated_waterfalls", f"{spec_date}_calibrated_preview.npz"),
         ))
 
     # Raw page
@@ -1579,7 +1592,7 @@ def process_single_day(
             plots.append(Plot(
                 page=PAGE_RAW, id=f"{name}_waterfall", type="heatmap",
                 title=f"{name} Waterfall  (Frequency [MHz] vs LST [hr])",
-                filePath=rel("raw_waterfalls", f"{spec_date}_{name}_2d.npz"),
+                filePath=rel("raw_waterfalls", f"{spec_date}_{name}_preview.npz"),
             ))
     plots.append(Plot(
         page=PAGE_RAW, id="avg_temp", type="single",

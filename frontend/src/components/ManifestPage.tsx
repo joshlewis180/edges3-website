@@ -83,7 +83,9 @@ export default function ManifestPage({ page, title }: Props) {
             className="btn btn-sm btn-outline-primary"
             onClick={() => setShowHeatmaps((prev) => !prev)}
           >
-            {showHeatmaps ? "Show images" : "Show interactive heatmaps"}
+            {showHeatmaps
+              ? "Show images"
+              : "Show interactive heatmaps (Large files, may take several seconds to load and cause crashes.)"}
           </button>
         </div>
       )}
