@@ -626,15 +626,15 @@ async def spa_fallback(full_path: str):
     return a clean 404 — falling back to ``index.html`` here would
     corrupt downstream loaders that expect binary bytes.
     """
-    last_segment = full_path.rsplit("/", 1)[-1]
-    if _LOOKS_LIKE_FILE.match(last_segment):
-        raise HTTPException(status_code=404, detail="Not found")
     if FRONTEND_DIST.exists():
         candidate = (FRONTEND_DIST / full_path).resolve()
         # Guard against path-traversal: candidate must stay under FRONTEND_DIST.
         if FRONTEND_DIST.resolve() in candidate.parents and candidate.is_file():
             return FileResponse(candidate)
-        index = FRONTEND_DIST / "index.html"
-        if index.exists():
-            return FileResponse(index)
+    last_segment = full_path.rsplit("/", 1)[-1]
+    if _LOOKS_LIKE_FILE.match(last_segment):
+        raise HTTPException(status_code=404, detail="Not found")
+    index = FRONTEND_DIST / "index.html"
+    if index.exists():
+        return FileResponse(index)
     raise HTTPException(status_code=404, detail="Frontend not built. Run `npm run build` in frontend/.")
