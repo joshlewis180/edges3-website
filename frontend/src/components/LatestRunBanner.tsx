@@ -124,40 +124,59 @@ export default function LatestRunBanner({ pageTitle }: BannerProps) {
 
       {hasS11Warning && s11Reference && (
         <div
-          className="alert alert-warning py-2 px-3 mb-0 small"
+          className="alert alert-danger border border-danger border-2 mb-0"
           role="alert"
           data-testid="s11-grid-warning"
+          style={{
+            fontSize: "1.15rem",
+            lineHeight: 1.5,
+            padding: "1.25rem 1.5rem",
+          }}
         >
-          <strong>S11 sweep mismatch.</strong>{" "}
-          The VNA was reconfigured mid-session, so the{" "}
-          <code>{s11Reference.file}</code> file was logged at a coarser
-          sweep ({s11Reference.count}&nbsp;pts,{" "}
-          {s11Reference.range_mhz[0].toFixed(1)}&ndash;
-          {s11Reference.range_mhz[1].toFixed(1)}&nbsp;MHz) than the rest
-          of the {latest.dates.s11} set. EDGES requires a single
-          frequency grid, so{" "}
-          {s11Mismatches.length === 1
-            ? "1 file was resampled down"
-            : `${s11Mismatches.length} files were resampled down`}{" "}
-          to match. Calibration is therefore restricted to{" "}
-          {s11Reference.range_mhz[0].toFixed(1)}&ndash;
-          {s11Reference.range_mhz[1].toFixed(1)}&nbsp;MHz.
+          <div
+            className="fw-bold mb-2"
+            style={{ fontSize: "1.5rem", letterSpacing: "0.02em" }}
+          >
+            Data quality warning — calibration may be erroneous
+          </div>
+          <p className="mb-2">
+            The VNA was reconfigured mid-session during this calibration.
+            The reference file <code>{s11Reference.file}</code> was logged
+            at a much coarser sweep (
+            {s11Reference.count}&nbsp;pts,&nbsp;
+            {s11Reference.range_mhz[0].toFixed(1)}&ndash;
+            {s11Reference.range_mhz[1].toFixed(1)}&nbsp;MHz) than the rest
+            of the {latest.dates.s11} set. Because EDGES requires a single
+            frequency grid,{" "}
+            {s11Mismatches.length === 1
+              ? "1 file was resampled"
+              : `${s11Mismatches.length} files were resampled`}{" "}
+            down to match, and calibration is now restricted to{" "}
+            {s11Reference.range_mhz[0].toFixed(1)}&ndash;
+            {s11Reference.range_mhz[1].toFixed(1)}&nbsp;MHz.
+          </p>
+          <p className="mb-2 fw-semibold">
+            The data in this range is likely erroneous. Do not trust the
+            calibrated temperature, the noise-wave fit (a, b), or the
+            antenna S11 model from this run without first reviewing the
+            raw measurements.
+          </p>
           {s11Mismatches.length > 0 && (
-            <details className="mt-1">
+            <details className="mt-2">
               <summary className="text-muted">
                 Show {s11Mismatches.length} resampled file
                 {s11Mismatches.length === 1 ? "" : "s"}
               </summary>
-              <div className="mt-1">
+              <div className="mt-2">
                 {s11Mismatches.map((w) => (
-                  <span key={w.file} className="me-2">
+                  <div key={w.file} className="mb-1">
                     <code>{w.file}</code>{" "}
                     <span className="text-muted">
                       ({w.from_count}&nbsp;pts{" "}
                       {w.from_range_mhz[0].toFixed(1)}&ndash;
                       {w.from_range_mhz[1].toFixed(1)}&nbsp;MHz)
                     </span>
-                  </span>
+                  </div>
                 ))}
               </div>
             </details>
