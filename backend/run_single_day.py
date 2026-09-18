@@ -21,6 +21,7 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -572,43 +573,49 @@ def read_antenna_acq(root: Path, spec_timestamp: str) -> GSData:
 # out-of-range points as NaN (so calibration only covers frequencies that
 # were actually measured). This preserves EDGES's preferred 151-pt grid
 # while making the load measurement honest outside its original range.
-def align_s11_grids(root: Path, s11date: str) -> List[Dict[str, Any]]:
-    """Resample ``{s11date}_*.s1p`` files onto a common grid in place.
+def align_s11_grids(
+    root: Path,
+    s11date: str,
+    cache_dir: Path,
+) -> Tuple[Path, List[Dict[str, Any]]]:
+    """Build a shadow directory with resampled ``{s11date}_*.s1p`` files.
 
-    When files in a single ``YYYY_DDD_HH`` set have different point
-    counts (typical when the VNA was reconfigured mid-session), EDGES's
-    ``gamma_de_embed`` raises ``ValueError: shapes (49,) (151,)`` and
-    the run fails. We fix this by resampling all files onto the
-    SMALLEST count present — that way every value in the output comes
-    from real measurements (no extrapolation), at the cost of narrowing
-    the calibration's frequency range.
+    The raw data root (``root``) is usually read-only on the cluster,
+    so we cannot modify the originals in place. Instead, this helper
+    creates ``cache_dir/{s11date}/`` containing the resampled files
+    alongside copies of the unresampled ones. The caller then
+    monkey-patches ``edges.io.vna.read_s1p`` (see
+    :func:`run_receiver_calibration`) so EDGES reads the shadow copies
+    instead of the originals.
 
-    Returns a list of warning dicts describing the resampled files::
+    When the VNA was reconfigured mid-session, files in a single
+    ``YYYY_DDD_HH`` set can have different point counts — the most
+    common case on the cluster is one coarse ``_amb.s1p`` (49 pts,
+    40–91 MHz) plus the rest at 151 pts (40–200 MHz). Without
+    alignment EDGES raises
+    ``ValueError: operands could not be broadcast together with shapes
+    (49,) (151,)``. We fix this by resampling every file onto the
+    SMALLEST count present — every output value is a real measurement
+    (no extrapolation), at the cost of narrowing the calibration's
+    frequency range.
 
-        {
-            "type": "s11_grid_mismatch",
-            "file": "2026_256_23_O.s1p",
-            "from_count": 151,
-            "to_count": 49,
-            "from_range_mhz": [40.0, 200.0],
-            "to_range_mhz": [40.0, 91.2],
-            "note": "Resampled onto the smallest grid in the date "
-                    "set so every output point is a real measurement.",
-        }
+    Returns ``(shadow_dir, warnings)``:
+      * ``shadow_dir`` — path to a directory containing the
+        ready-to-read .s1p files for ``s11date``. Empty if no resampling
+        was needed.
+      * ``warnings`` — empty list if all files already share a grid,
+        otherwise a single envelope ``[{"reference": {...},
+        "warnings": [...]}]``.
 
-    The function is idempotent: if all files already share a grid, the
-    list is empty and no files are touched. Files are read with EDGES's
-    Touchstone-aware reader (``read_s1p``) and written back as
-    ``BEGIN/RI/END`` — both formats handle ``BEGIN/DB/END`` and the
-    ``# RI/MA/DB`` settings-line variants.
+    The shadow is cached in ``cache_dir`` so subsequent runs with the
+    same ``s11date`` reuse it without re-reading or re-resampling.
     """
-    warnings: List[Dict[str, Any]] = []
-    reference: Dict[str, Any] = {}
+    shadow = cache_dir / s11date
     files = sorted(root.glob(f"{s11date}_*.s1p"))
     if len(files) < 2:
-        return warnings
+        return shadow, []
 
-    # Lazy import — only needed when there is actually a mismatch.
+    # Lazy import — only needed when there's actual work to do.
     from edges.io.vna import read_s1p  # noqa: E402
 
     grids: Dict[Path, Tuple[np.ndarray, np.ndarray]] = {}
@@ -624,16 +631,22 @@ def align_s11_grids(root: Path, s11date: str) -> List[Dict[str, Any]]:
         grids[f] = (freqs, s11)
 
     if len(grids) < 2:
-        return warnings
+        return shadow, []
 
     counts = {f: len(g[0]) for f, g in grids.items()}
     distinct = set(counts.values())
     if len(distinct) <= 1:
-        return warnings  # all aligned already
+        # All aligned. Build a shadow with copies of the originals so
+        # ``read_s1p`` can resolve any file in the date uniformly.
+        shadow.mkdir(parents=True, exist_ok=True)
+        for f in grids:
+            target = shadow / f.name
+            if not target.exists():
+                shutil.copy(f, target)
+        return shadow, []
 
-    # Resample DOWN onto the smallest grid — every output value is a
-    # real measurement; calibration range narrows to the smallest file's
-    # span. This is the conservative choice: no extrapolation, no NaN.
+    # Mismatch detected: resample DOWN onto the smallest grid.
+    shadow.mkdir(parents=True, exist_ok=True)
     target_count = min(distinct)
     target_files = [f for f, n in counts.items() if n == target_count]
     target_file = target_files[0]
@@ -641,6 +654,7 @@ def align_s11_grids(root: Path, s11date: str) -> List[Dict[str, Any]]:
     target_fmin_mhz = float(target_freqs[0]) / 1e6
     target_fmax_mhz = float(target_freqs[-1]) / 1e6
 
+    warnings: List[Dict[str, Any]] = []
     reference = {
         "type": "s11_grid_reference",
         "file": target_file.name,
@@ -650,16 +664,22 @@ def align_s11_grids(root: Path, s11date: str) -> List[Dict[str, Any]]:
     }
 
     for f, (freqs, s11) in grids.items():
+        target_path = shadow / f.name
         if len(freqs) == target_count and np.allclose(freqs, target_freqs):
+            # Reference file — copy the original into the shadow so
+            # the patched reader always finds a file there.
+            if not target_path.exists():
+                shutil.copy(f, target_path)
             continue
+
         new_real = np.interp(target_freqs, freqs, s11.real)
         new_imag = np.interp(target_freqs, freqs, s11.imag)
 
-        # Write back in Touchstone v1 BEGIN/RI/END format — frequency in
-        # Hz, S11 as real/imag. EDGES's reader always interprets
-        # ``d[:,0]`` as Hz regardless of the settings line, so
-        # BEGIN/RI/END with no unit prefix is the safe choice.
-        with open(f, "w") as fh:
+        # Touchstone v1 BEGIN/RI/END — frequency in Hz, S11 as
+        # real/imag. EDGES's reader always interprets ``d[:,0]`` as
+        # Hz regardless of the settings-line unit, so BEGIN/RI/END
+        # with no unit prefix is the safe choice.
+        with open(target_path, "w") as fh:
             fh.write("BEGIN\nRI\n")
             for fr_hz, rr, ii in zip(target_freqs, new_real, new_imag):
                 fh.write(f"{fr_hz:.6f} {rr:.8e} {ii:.8e}\n")
@@ -675,9 +695,7 @@ def align_s11_grids(root: Path, s11date: str) -> List[Dict[str, Any]]:
         })
 
     warnings.sort(key=lambda w: w["file"])
-    # Return a single envelope so the API can ship the reference plus
-    # the per-file warnings in one document.
-    return [{"reference": reference, "warnings": warnings}]
+    return shadow, [{"reference": reference, "warnings": warnings}]
 
 
 def _flatten_align_result(
@@ -695,6 +713,45 @@ def _flatten_align_result(
         return {}, []
     env = result[0]
     return env.get("reference", {}), env.get("warnings", [])
+
+
+def _install_s11_shadow_reader(
+    root: Path,
+    s11date: str,
+    shadow_dir: Path,
+):
+    """Monkey-patch ``edges.io.vna.read_s1p`` so reads of
+    ``{s11date}_*.s1p`` under ``root`` resolve to ``shadow_dir``.
+
+    Returns a callable that restores the original reader. The caller
+    MUST invoke it (typically in a ``finally`` block) so other code
+    that reads .s1p files (e.g. the antenna S11 calibration later in
+    the pipeline) is unaffected.
+    """
+    import edges.io.vna as vna_io  # noqa: E402
+
+    original = vna_io.read_s1p
+    root_resolved = root.resolve()
+
+    def patched(path, *args, **kwargs):
+        p = Path(path)
+        try:
+            if p.parent.resolve() == root_resolved and p.name.startswith(f"{s11date}_"):
+                shadow_path = shadow_dir / p.name
+                if shadow_path.exists():
+                    return original(shadow_path, *args, **kwargs)
+        except OSError:
+            # ``Path.resolve()`` can fail on broken symlinks; fall
+            # through to the original reader in that case.
+            pass
+        return original(path, *args, **kwargs)
+
+    vna_io.read_s1p = patched
+
+    def restore():
+        vna_io.read_s1p = original
+
+    return restore
 
 
 # ---------------------------------------------------------------------------
@@ -725,20 +782,22 @@ def run_receiver_calibration(
     must pass the actual probe readings (not hardcoded setpoints) to
     keep the noise-wave model honest.
 
-    Before calling EDGES, the helper ``align_s11_grids`` resamples any
-    ``{s11_run}_*.s1p`` file that has a different point count onto the
-    smallest grid present in the date set, so every output point is a
-    real measurement. This is what keeps the pipeline running when the
-    VNA was reconfigured mid-session. Warnings about resampled files
-    are written to ``<outdir>/../s11_grid_warnings.json`` so the API
-    can surface them.
+    Before calling EDGES, the helper ``align_s11_grids`` builds a
+    shadow copy of the ``{s11_run}_*.s1p`` files under ``cache_dir``
+    (resampled onto a common grid when the VNA was reconfigured
+    mid-session). EDGES's reader is then monkey-patched so reads of
+    these files under ``root`` resolve to the shadow. The raw data
+    files in ``root`` are NEVER modified — the cluster filesystem is
+    typically read-only. Warnings about resampled files are written to
+    ``<outdir>/../s11_grid_warnings.json`` so the API can surface them.
     """
     year, day = parse_yyyy_ddd(cal_date)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    s11_reference, s11_warnings = _flatten_align_result(
-        align_s11_grids(root, s11_run)
-    )
+    s11_cache = outdir.parent / "s11_cache"
+    shadow_dir, align_envelope = align_s11_grids(root, s11_run, s11_cache)
+    s11_reference, s11_warnings = _flatten_align_result(align_envelope)
+
     if s11_warnings:
         warnings_path = outdir.parent / "s11_grid_warnings.json"
         warnings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -755,48 +814,53 @@ def run_receiver_calibration(
             f"({s11_reference.get('count', '?')} pts, "
             f"{ref_range[0]}–{ref_range[1]} MHz). Resampled "
             f"{len(s11_warnings)} files down to match; calibration is "
-            f"restricted to {ref_range[0]}–{ref_range[1]} MHz."
+            f"restricted to {ref_range[0]}–{ref_range[1]} MHz. "
+            f"Shadow directory: {shadow_dir}"
         )
 
-    alancal_edges3(
-        data=Edges3CalobsParams(
-            specyear=year,
-            specday=day,
-            s11date=s11_run,
-            datadir=root,
-            match_resistance=49.8,
-            calkit_delays=33,
-            lna_cable_length=4.26,
-            lna_cable_loss=-91.5,
-            lna_cable_dielectric=-1.24,
-        ),
-        opts=AlanCalOpts(
-            avg=ACQPlot7aMoonParams(
-                fstart=fstart,
-                fstop=fstop,
-                delaystart=0,
-                smooth=8,
-                tload=300,
-                tcal=1000,
+    restore_reader = _install_s11_shadow_reader(root, s11_run, shadow_dir)
+    try:
+        alancal_edges3(
+            data=Edges3CalobsParams(
+                specyear=year,
+                specday=day,
+                s11date=s11_run,
+                datadir=root,
+                match_resistance=49.8,
+                calkit_delays=33,
+                lna_cable_length=4.26,
+                lna_cable_loss=-91.5,
+                lna_cable_dielectric=-1.24,
             ),
-            cal=EdgesScriptParams(
-                wfstart=wfstart,
-                wfstop=wfstop,
-                Lh=-1,
-                thot=hot_temp_k,
-                tcold=ambient_temp_k,
-                tcab=cable_temp_k,
-                cfit=cterms,
-                wfit=wterms,
-                nfit2=27,
-                nfit3=10,
+            opts=AlanCalOpts(
+                avg=ACQPlot7aMoonParams(
+                    fstart=fstart,
+                    fstop=fstop,
+                    delaystart=0,
+                    smooth=8,
+                    tload=300,
+                    tcal=1000,
+                ),
+                cal=EdgesScriptParams(
+                    wfstart=wfstart,
+                    wfstop=wfstop,
+                    Lh=-1,
+                    thot=hot_temp_k,
+                    tcold=ambient_temp_k,
+                    tcab=cable_temp_k,
+                    cfit=cterms,
+                    wfit=wterms,
+                    nfit2=27,
+                    nfit3=10,
+                ),
+                plot=False,
+                out=outdir,
+                redo_spectra=False,
+                redo_cal=True,
             ),
-            plot=False,
-            out=outdir,
-            redo_spectra=False,
-            redo_cal=True,
-        ),
-    )
+        )
+    finally:
+        restore_reader()
 
     specal = outdir / "specal.txt"
     s11_modelled = outdir / "s11_modelled.txt"
