@@ -14,9 +14,13 @@ GET  /health                 Liveness probe
 
 Static files
 ------------
-``OUTPUT_ROOT`` is mounted under ``/`` so that ``/manifest.json``,
-``/runs/<id>/...``, ``/saved/<name>.zip``, etc. are directly fetchable
-by the browser.
+``OUTPUT_ROOT`` is mounted under ``/data`` (and legacy paths
+``/runs``, ``/saved`` for backward compatibility with older manifests)
+so that ``/data/manifest.json``, ``/data/runs/<id>/...``,
+``/data/saved/<name>.zip``, etc. are directly fetchable by the browser.
+The built SPA is served from ``frontend/dist/`` at ``/`` with a
+catch-all fallback that returns ``index.html`` for React Router paths
+like ``/Select``.
 
 Concurrency
 -----------
@@ -568,19 +572,46 @@ def download(name: str) -> FileResponse:
 
 # ---------------------------------------------------------------------------
 # Static file serving — order matters: API routes are matched first, then
-# the /data mount for OUTPUT_ROOT (manifest, runs/, saved/), then the
-# /assets/* StaticFiles for built JS/CSS, and finally a catch-all SPA
-# fallback that serves index.html so React Router can handle /Select etc.
+# the /data mount for OUTPUT_ROOT (manifest, runs/, saved/), and finally
+# a catch-all SPA fallback that serves index.html so React Router can
+# handle /Select etc.
 # ---------------------------------------------------------------------------
 FRONTEND_DIST: Path = config.REPO_ROOT / "frontend" / "dist"
 DATA_PREFIX = "/data"
 
 # /data/* → OUTPUT_ROOT (manifest.json, runs/<id>/..., saved/<name>.zip, …)
+# This is the canonical mount used by manifests written since the
+# /data/ prefix was introduced.
 app.mount(
     DATA_PREFIX,
     StaticFiles(directory=str(config.OUTPUT_ROOT), html=False),
     name="outputs",
 )
+
+# Backward-compat mounts for manifests written before the /data/ prefix
+# existed — they referenced ``/runs/<id>/foo.npz`` and ``/saved/foo.zip``
+# directly. Keeping these mounted means stale manifests from previous
+# runs continue to load their .npz files instead of falling through to
+# the SPA fallback (which would return HTML and break JSZip downstream).
+if (config.OUTPUT_ROOT / "runs").is_dir():
+    app.mount(
+        "/runs",
+        StaticFiles(directory=str(config.OUTPUT_ROOT / "runs"), html=False),
+        name="runs_legacy",
+    )
+if (config.OUTPUT_ROOT / "saved").is_dir():
+    app.mount(
+        "/saved",
+        StaticFiles(directory=str(config.OUTPUT_ROOT / "saved"), html=False),
+        name="saved_legacy",
+    )
+
+
+# Heuristic: a path whose last segment contains a dot is treated as a
+# file request, not an SPA route. Without this, a 404 on /runs/<id>/foo.npz
+# would return index.html (because the catch-all matches), which then
+# gets fed to JSZip and produces "Can't find end of central directory".
+_LOOKS_LIKE_FILE = re.compile(r"^[^/]*\.[^/]+$")
 
 
 @app.get("/{full_path:path}", include_in_schema=False)
@@ -590,7 +621,14 @@ async def spa_fallback(full_path: str):
     Real file (``/assets/index-…js``, ``/favicon.svg``, etc.) → that file.
     Anything else (``/Select``, ``/CalibrationData``, …) → ``index.html``
     so React Router can take over.
+
+    Paths whose last segment looks like a file (e.g. ``/foo/bar.npz``)
+    return a clean 404 — falling back to ``index.html`` here would
+    corrupt downstream loaders that expect binary bytes.
     """
+    last_segment = full_path.rsplit("/", 1)[-1]
+    if _LOOKS_LIKE_FILE.match(last_segment):
+        raise HTTPException(status_code=404, detail="Not found")
     if FRONTEND_DIST.exists():
         candidate = (FRONTEND_DIST / full_path).resolve()
         # Guard against path-traversal: candidate must stay under FRONTEND_DIST.
