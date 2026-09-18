@@ -291,6 +291,19 @@ def _write_latest(run_id: str, dates: Dict[str, str]) -> None:
     if actual_temps:
         payload["actual_temperatures"] = actual_temps
     payload["has_2d"] = any(config.OUTPUT_ROOT.rglob("*_2d.npz"))
+
+    # Surface any pipeline warnings (e.g. S11 grid resampling) so the
+    # frontend banner can show them. The warnings file is written by
+    # ``run_single_day.align_s11_grids`` inside the run directory.
+    run_dir = config.RUNS_DIR / run_id
+    warnings_file = run_dir / "s11_grid_warnings.json"
+    if warnings_file.exists():
+        try:
+            with open(warnings_file, "r") as wf:
+                payload["warnings"] = json.load(wf).get("warnings", [])
+        except Exception:
+            pass
+
     _write_json(config.LATEST_RUN_FILE, payload)
 
 

@@ -78,6 +78,16 @@ export interface ActualTemperature {
   temperature_k: number | null
 }
 
+export interface S11GridWarning {
+  type: "s11_grid_mismatch"
+  file: string
+  from_count: number
+  to_count: number
+  from_range_mhz: [number, number]
+  to_range_mhz: [number, number]
+  note: string
+}
+
 export interface LatestRunInfo {
   source: PlotSource | null
   run_id: string | null
@@ -88,4 +98,7 @@ export interface LatestRunInfo {
   actual_temperatures?: Record<string, ActualTemperature>
   /** True if any ``_2d.npz`` heatmap files exist in the current source tree. */
   has_2d?: boolean
+  /** Non-fatal pipeline warnings (e.g. S11 grid resampling) — empty
+   *  array or undefined means the run was clean. */
+  warnings?: S11GridWarning[]
 }

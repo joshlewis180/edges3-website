@@ -12,7 +12,7 @@
 import { useState } from "react"
 import { useRunState } from "../state/RunContext"
 import { BASE_URL } from "../utils/baseURL"
-import type { ActualTemperature } from "../types/manifest"
+import type { ActualTemperature, S11GridWarning } from "../types/manifest"
 
 type BannerProps = {
   pageTitle?: string
@@ -64,6 +64,9 @@ export default function LatestRunBanner({ pageTitle }: BannerProps) {
     })
     .filter((line): line is string => Boolean(line))
 
+  const warnings = latest.warnings ?? []
+  const s11Warnings = warnings.filter((w): w is S11GridWarning => w.type === "s11_grid_mismatch")
+
   async function handleSave() {
     setSaving(true)
     setMessage(null)
@@ -108,6 +111,33 @@ export default function LatestRunBanner({ pageTitle }: BannerProps) {
         )}
         {dateLine && <div className="small">{dateLine}</div>}
       </div>
+
+      {s11Warnings.length > 0 && (
+        <div
+          className="alert alert-warning py-2 px-3 mb-0 small"
+          role="alert"
+          data-testid="s11-grid-warning"
+        >
+          <strong>S11 grid mismatch detected.</strong>{" "}
+          {s11Warnings.length === 1
+            ? "One .s1p file was resampled before calibration:"
+            : `${s11Warnings.length} .s1p files were resampled before calibration:`}
+          <ul className="mb-0 mt-1 ps-3">
+            {s11Warnings.map((w) => (
+              <li key={w.file}>
+                <code>{w.file}</code>: {w.from_count} pts&nbsp;
+                ({w.from_range_mhz[0].toFixed(2)}&ndash;
+                {w.from_range_mhz[1].toFixed(2)}&nbsp;MHz)
+                &nbsp;\u2192&nbsp;{w.to_count}&nbsp;pts&nbsp;
+                ({w.to_range_mhz[0].toFixed(2)}&ndash;
+                {w.to_range_mhz[1].toFixed(2)}&nbsp;MHz).
+                Calibration is only valid inside the original measurement
+                range; points outside are NaN.
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {tempLines.length > 0 && (
         <div className="small">

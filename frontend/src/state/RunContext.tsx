@@ -37,6 +37,7 @@ const EMPTY_LATEST: LatestRunInfo = {
   generated_at: null,
   actual_temperatures: {},
   has_2d: false,
+  warnings: [],
 }
 
 const RunContext = createContext<RunState | null>(null)
@@ -60,6 +61,7 @@ export function RunProvider({ children }: { children: ReactNode }) {
         generated_at: data.generated_at ?? null,
         actual_temperatures: data.actual_temperatures ?? {},
         has_2d: data.has_2d ?? false,
+        warnings: Array.isArray(data.warnings) ? data.warnings : [],
       })
     } catch {
       // Silently ignore — banner will just be empty until the next refresh.

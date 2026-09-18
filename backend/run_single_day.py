@@ -557,6 +557,111 @@ def read_antenna_acq(root: Path, spec_timestamp: str) -> GSData:
 
 
 # ---------------------------------------------------------------------------
+# S11 grid alignment
+# ---------------------------------------------------------------------------
+# EDGES assumes every ``.s1p`` file in a single ``YYYY_DDD_HH`` set shares a
+# frequency grid (it does e.g. ``gamma_in - sparams.s11`` inside
+# ``gamma_de_embed`` and broadcasts). When the VNA was reconfigured mid-
+# session, files can have different point counts — the most common case on
+# the cluster is one coarse ``_amb.s1p`` (49 pts, 40–91 MHz) plus the rest
+# at 151 pts (40–200 MHz). Without alignment, EDGES raises
+# ``ValueError: operands could not be broadcast together with shapes (49,)
+# (151,)`` and the run fails.
+#
+# Strategy: resample every file onto the LARGEST count present, marking
+# out-of-range points as NaN (so calibration only covers frequencies that
+# were actually measured). This preserves EDGES's preferred 151-pt grid
+# while making the load measurement honest outside its original range.
+def align_s11_grids(root: Path, s11date: str) -> List[Dict[str, Any]]:
+    """Resample ``{s11date}_*.s1p`` files onto a common grid in place.
+
+    Returns a list of warning dicts describing any files that were
+    resampled. Each entry has::
+
+        {
+            "type": "s11_grid_mismatch",
+            "file": "2026_256_23_amb.s1p",
+            "from_count": 49,
+            "to_count": 151,
+            "from_range_mhz": [40.0, 91.2],
+            "to_range_mhz": [40.0, 200.0],
+            "note": "Resampled onto the dominant grid; values outside "
+                    "the original measurement range are NaN.",
+        }
+
+    The function is idempotent: if all files already share a grid,
+    the list is empty and no files are touched.
+    """
+    warnings: List[Dict[str, Any]] = []
+    files = sorted(root.glob(f"{s11date}_*.s1p"))
+    if len(files) < 2:
+        return warnings
+
+    # Read each file, capture (freqs_hz, complex_s11).
+    grids: Dict[Path, Tuple[np.ndarray, np.ndarray]] = {}
+    for f in files:
+        try:
+            data = np.loadtxt(f, comments=["#", "!", ";"])
+        except Exception:
+            continue
+        if data.ndim != 2 or data.shape[0] == 0 or data.shape[1] < 3:
+            continue
+        grids[f] = (data[:, 0].astype(float), data[:, 1] + 1j * data[:, 2])
+
+    if len(grids) < 2:
+        return warnings
+
+    counts = {f: len(g[0]) for f, g in grids.items()}
+    distinct = set(counts.values())
+    if len(distinct) <= 1:
+        return warnings  # all aligned already
+
+    # Pick the largest grid as target.
+    target_count = max(distinct)
+    # The "reference" file is whichever 151-pt file exists; if none, any
+    # file with the target count.
+    target_file = next(f for f, n in counts.items() if n == target_count)
+    target_freqs = grids[target_file][0]
+    target_fmin_mhz = float(target_freqs[0]) / 1e6
+    target_fmax_mhz = float(target_freqs[-1]) / 1e6
+
+    for f, (freqs, s11) in grids.items():
+        if len(freqs) == target_count and np.allclose(freqs, target_freqs):
+            continue
+        # Resample real + imag onto the target grid; mark out-of-range
+        # points as NaN so calibration stays honest beyond the original
+        # measurement range.
+        new_real = np.interp(target_freqs, freqs, s11.real)
+        new_imag = np.interp(target_freqs, freqs, s11.imag)
+        out_of_range = (target_freqs < freqs[0]) | (target_freqs > freqs[-1])
+        if out_of_range.any():
+            new_real = new_real.astype(float).copy()
+            new_imag = new_imag.astype(float).copy()
+            new_real[out_of_range] = np.nan
+            new_imag[out_of_range] = np.nan
+        out = np.column_stack([target_freqs, new_real, new_imag])
+        np.savetxt(f, out, fmt="%.6f %.8e %.8e")
+        warnings.append({
+            "type": "s11_grid_mismatch",
+            "file": f.name,
+            "from_count": int(len(freqs)),
+            "to_count": int(target_count),
+            "from_range_mhz": [round(float(freqs[0]) / 1e6, 4),
+                               round(float(freqs[-1]) / 1e6, 4)],
+            "to_range_mhz": [round(target_fmin_mhz, 4),
+                             round(target_fmax_mhz, 4)],
+            "note": (
+                "Resampled onto the dominant grid; values outside the "
+                "original measurement range are NaN."
+            ),
+        })
+
+    # Stable order so the UI list is deterministic.
+    warnings.sort(key=lambda w: w["file"])
+    return warnings
+
+
+# ---------------------------------------------------------------------------
 # Receiver calibration
 # ---------------------------------------------------------------------------
 def run_receiver_calibration(
@@ -583,9 +688,31 @@ def run_receiver_calibration(
     pass becomes the value reported in ``calibrated_temps.txt``. So we
     must pass the actual probe readings (not hardcoded setpoints) to
     keep the noise-wave model honest.
+
+    Before calling EDGES, the helper ``align_s11_grids`` resamples any
+    ``{s11_run}_*.s1p`` file that has a different point count onto the
+    dominant grid (out-of-range points become NaN). This is what keeps
+    the pipeline running when the VNA was reconfigured mid-session.
+    Warnings about resampled files are written to
+    ``<outdir>/../s11_grid_warnings.json`` so the API can surface them.
     """
     year, day = parse_yyyy_ddd(cal_date)
     outdir.mkdir(parents=True, exist_ok=True)
+
+    s11_warnings = align_s11_grids(root, s11_run)
+    if s11_warnings:
+        warnings_path = outdir.parent / "s11_grid_warnings.json"
+        warnings_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(warnings_path, "w") as wf:
+            json.dump({"warnings": s11_warnings}, wf, indent=2)
+        for w in s11_warnings:
+            print(
+                f"[run] WARNING: {w['file']} had {w['from_count']} pts "
+                f"({w['from_range_mhz'][0]}–{w['from_range_mhz'][1]} MHz); "
+                f"resampled to {w['to_count']} pts ({w['to_range_mhz'][0]}–"
+                f"{w['to_range_mhz'][1]} MHz) with NaN outside the "
+                f"original range."
+            )
 
     alancal_edges3(
         data=Edges3CalobsParams(
