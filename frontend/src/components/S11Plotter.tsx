@@ -4,7 +4,7 @@
  */
 
 import { useEffect, useState } from "react"
-import Plot from "react-plotly.js"
+import Plot from "../utils/plotComponent"
 import { openS11File } from "../utils/s11Loader"
 import type { S11Data } from "../utils/s11Loader"
 import { withBaseUrl } from "../utils/baseURL"

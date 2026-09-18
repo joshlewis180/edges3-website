@@ -413,8 +413,8 @@ def run_pipeline(
             "source": "user",
             "path": str(existing_path),
         }
-        new_plot_prefix = f"runs/{run_dir.name}"
-        old_prefix = f"runs/{existing_path.name}"
+        new_plot_prefix = f"{DATA_PREFIX}/runs/{run_dir.name}"
+        old_prefix = f"{DATA_PREFIX}/runs/{existing_path.name}"
         for plot in new_manifest.get("plots", []):
             for key in ("filePath", "filePath1", "filePath2"):
                 v = plot.get(key)
@@ -438,7 +438,7 @@ def run_pipeline(
         "run_id": run_id,
         "dates": resolved,
         "parameters": merged,
-        "manifest": "manifest.json",
+        "manifest": f"{DATA_PREFIX}/manifest.json",
         "run_hash": run_hash,
         "reused_from": reused_from,
     }
@@ -567,8 +567,36 @@ def download(name: str) -> FileResponse:
 
 
 # ---------------------------------------------------------------------------
-# Static file serving — MUST come last so it doesn't shadow the API routes.
+# Static file serving — order matters: API routes are matched first, then
+# the /data mount for OUTPUT_ROOT (manifest, runs/, saved/), then the
+# /assets/* StaticFiles for built JS/CSS, and finally a catch-all SPA
+# fallback that serves index.html so React Router can handle /Select etc.
 # ---------------------------------------------------------------------------
-# Serve OUTPUT_ROOT at "/" so /manifest.json, /runs/<id>/..., /saved/...
-# are all reachable directly by the browser.
-app.mount("/", StaticFiles(directory=str(config.OUTPUT_ROOT), html=False), name="outputs")
+FRONTEND_DIST: Path = config.REPO_ROOT / "frontend" / "dist"
+DATA_PREFIX = "/data"
+
+# /data/* → OUTPUT_ROOT (manifest.json, runs/<id>/..., saved/<name>.zip, …)
+app.mount(
+    DATA_PREFIX,
+    StaticFiles(directory=str(config.OUTPUT_ROOT), html=False),
+    name="outputs",
+)
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa_fallback(full_path: str):
+    """Serve the built SPA.
+
+    Real file (``/assets/index-…js``, ``/favicon.svg``, etc.) → that file.
+    Anything else (``/Select``, ``/CalibrationData``, …) → ``index.html``
+    so React Router can take over.
+    """
+    if FRONTEND_DIST.exists():
+        candidate = (FRONTEND_DIST / full_path).resolve()
+        # Guard against path-traversal: candidate must stay under FRONTEND_DIST.
+        if FRONTEND_DIST.resolve() in candidate.parents and candidate.is_file():
+            return FileResponse(candidate)
+        index = FRONTEND_DIST / "index.html"
+        if index.exists():
+            return FileResponse(index)
+    raise HTTPException(status_code=404, detail="Frontend not built. Run `npm run build` in frontend/.")

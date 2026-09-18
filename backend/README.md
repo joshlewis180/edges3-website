@@ -16,11 +16,11 @@ FastAPI service + the EDGES-3 calibration/temperature pipeline.
 ## Running locally
 
 ```bash
-cd edges-interface
+cd edges3-website
 source .venv/bin/activate   # uv venv created during install
 
 cd backend
-python -m uvicorn backend_api:app --host 127.0.0.1 --port 8000
+python -m uvicorn backend_api:app --host 127.0.0.1 --port 8003
 ```
 
 ## Running the pipeline manually
@@ -46,7 +46,7 @@ sensible defaults for the SSH cluster. Override any of these:
 export EDGES_RAW_DATA_ROOT=/path/to/mro
 export EDGES_OUTPUT_ROOT=/path/to/outputs
 export EDGES_TEMP_LOG_DIR=/path/to/temperature_logger
-python -m uvicorn backend_api:app --host 127.0.0.1 --port 8000
+python -m uvicorn backend_api:app --host 127.0.0.1 --port 8003
 ```
 
 See the top-level `README.md` for the full env-var table.

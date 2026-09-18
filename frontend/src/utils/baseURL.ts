@@ -1,19 +1,24 @@
 /**
  * Frontend ↔ backend connection.
  *
- * `BASE_URL` is read from the Vite env (`VITE_API_URL`) at build time, with
- * a fallback for local development. The same bundle works both on
- * localhost and on the SSH cluster via port-forwarding (see the project
- * README for the `ssh -L` workflow).
+ * `BASE_URL` defaults to an empty string so every request is sent to the
+ * same origin that served the SPA bundle. The Vite dev server (and any
+ * reverse proxy in production) then forwards those paths to the FastAPI
+ * backend — see `vite.config.ts` for the dev proxy map.
  *
- *   Local:   leave VITE_API_URL unset → http://127.0.0.1:8000
- *   Cluster: set VITE_API_URL=http://127.0.0.1:8000 (after ssh -L)
+ * This makes the SSH-tunnel workflow trivial: only one tunnel is needed
+ * (`ssh -L 8880:localhost:5173 …`) and the laptop's browser talks only
+ * to its own localhost.
+ *
+ * Override at build time with `VITE_API_URL=http://some.host:port` if
+ * the backend lives on a different origin (e.g. when serving the built
+ * `dist/` from a separate static host).
  */
 
-const DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+const DEFAULT_BASE_URL = ""
 
 export const BASE_URL: string =
-  (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ||
+  (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ??
   DEFAULT_BASE_URL
 
 /**

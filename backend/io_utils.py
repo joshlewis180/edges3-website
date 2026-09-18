@@ -224,6 +224,13 @@ def compute_run_hash(dates: Dict[str, str], parameters: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 # Manifest writer
 # ---------------------------------------------------------------------------
+# The FastAPI backend serves OUTPUT_ROOT under the URL prefix ``/data``
+# (see ``backend_api.py``). Paths stored in the manifest are absolute
+# (e.g. ``/data/runs/<id>/calibrated.npz``) so the browser can fetch them
+# without needing to know the on-disk layout.
+DATA_PREFIX = "/data"
+
+
 def write_manifest(
     output_root: Path,
     run_dir: Path,
@@ -233,24 +240,23 @@ def write_manifest(
 ) -> Path:
     """Write ``manifest.json`` and ``latest_run.json`` for one run.
 
-    ``output_root`` is the *display* root (e.g. ``OUTPUT_ROOT/daemon`` or
-    ``OUTPUT_ROOT/user``). The relative path stored in the manifest is
-    ``<source-runs-dir>/<run_id>/...`` so the frontend can fetch via the
-    static mount.
+    ``output_root`` is the on-disk root. Paths stored in the manifest
+    are absolute URLs (``/data/...``) because FastAPI serves
+    ``OUTPUT_ROOT`` under the ``/data`` prefix.
     """
-    # The "latest run" symlink/path always points to runs/<run_id>/...
     rel_run = f"runs/{run_dir.name}"
 
     rendered = []
     for p in plots:
         d = p.to_dict()
-        # Rewrite absolute paths (in case the caller pre-built them) so they
-        # are relative to the display root.
+        # Rewrite absolute paths (in case the caller pre-built them) so
+        # they point at the /data/ static mount.
         for key in ("filePath", "filePath1", "filePath2"):
             v = d.get(key)
             if v and Path(v).is_absolute():
                 try:
-                    d[key] = str(Path(v).relative_to(output_root))
+                    rel = Path(v).relative_to(output_root)
+                    d[key] = f"{DATA_PREFIX}/{rel.as_posix()}"
                 except ValueError:
                     d[key] = v
         d.setdefault("source", source)
@@ -273,7 +279,7 @@ def write_manifest(
         "source": source,
         "run_id": run_dir.name,
         "dates": dates,
-        "manifest": str(out_manifest.relative_to(output_root.parent)),
+        "manifest": f"{DATA_PREFIX}/manifest.json",
         "generated_at": manifest["generated_at"],
     }
     return out_manifest

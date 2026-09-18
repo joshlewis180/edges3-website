@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react"
-import Plot from "react-plotly.js"
+import Plot from "../utils/plotComponent"
 import { openHeatmapFile } from "../utils/heatmapLoader"
 import type { HeatmapData } from "../utils/heatmapLoader"
 import { withBaseUrl } from "../utils/baseURL"

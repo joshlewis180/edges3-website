@@ -6,7 +6,7 @@ backend are intended to be **installed and run on the SSH cluster**;
 users reach the UI from a laptop by SSH-tunnelling the dev server.
 
 ```
-edges-interface/
+edges3-website/
 ├── backend/          # FastAPI server + EDGES pipeline (Python)
 ├── frontend/         # React + TypeScript + Vite SPA
 ├── README.md         # ← you are here
@@ -29,8 +29,8 @@ when you click "Run with these dates" on the Select page.
 ### 1. Clone the repo
 
 ```bash
-git clone <repo-url> edges-interface
-cd edges-interface
+git clone https://github.com/joshlewis180/edges3-website.git
+cd edges3-website
 ```
 
 ### 2. Install the Python backend (uv)
@@ -65,49 +65,74 @@ npm install                 # one-off
 
 ---
 
-## Run the two servers (every session, on the SSH cluster)
+## Run the server (every session, on the SSH cluster)
 
-You'll need **two terminals** connected to the SSH cluster.
+You'll need **one terminal** connected to the SSH cluster. The FastAPI
+backend serves both the API and the built React SPA, so no separate
+frontend dev server is needed.
 
-### Terminal 1 — backend
+### Step 1 — build the frontend (one-off per frontend change)
 
 ```bash
-cd edges-interface
+cd edges3-website/frontend
+npm run build      # writes frontend/dist/
+```
+
+### Step 2 — start the backend
+
+```bash
+cd edges3-website
 source .venv/bin/activate
 cd backend
 EDGES_PYTHON=$(which python) \
-  python -m uvicorn backend_api:app --host 127.0.0.1 --port 8000
+  python -m uvicorn backend_api:app --host 127.0.0.1 --port 8003
 ```
 
-Leave it running. Defaults in `backend/config.py` point at the cluster
-paths (`/data5/edges/data/EDGES3_data/MRO` for raw data,
-`<repo>/outputs` for outputs). Override any of them with the env vars
-documented below.
+Leave it running. It serves:
 
-### Terminal 2 — frontend (Vite dev server)
+* `/`             — the React SPA (`frontend/dist/`)
+* `/data/...`     — `OUTPUT_ROOT` (manifest, `runs/<id>/...`, saved zips)
+* `/run_pipeline`, `/save_outputs`, etc. — JSON API endpoints
 
-```bash
-cd edges-interface/frontend
-npm run dev                 # serves on http://localhost:5173
-```
+Defaults in `backend/config.py` point at the cluster paths
+(`/data5/edges/data/EDGES3_data/MRO` for raw data, `<repo>/outputs`
+for outputs). Override any of them with the env vars documented below.
 
 ### View the UI from your laptop
 
-The frontend dev server runs on the cluster but listens on `localhost`
-only. SSH-tunnel it to your laptop so your browser can reach it:
+The backend listens on `localhost` only. SSH-tunnel it to your laptop:
 
 ```bash
 # From your laptop (NOT the cluster):
+ssh -L 8880:localhost:8003 your_user@edges-cluster.example.com
+```
+
+Open `http://localhost:8880/` in your browser. The SPA loads as
+pre-compiled static chunks (no Vite at runtime), and every API/static
+request stays within this single tunnel.
+
+> If 8880 is taken on your laptop: `ssh -L 9090:localhost:8003 …` and
+> open `http://localhost:9090/`.
+
+### Optional — Vite dev server for hot-reloading frontend code
+
+If you're actively editing frontend code, run Vite's dev server in a
+second terminal and tunnel that instead:
+
+```bash
+# Cluster, terminal 2:
+cd edges3-website/frontend
+npm run dev          # serves on http://localhost:5173, proxies /api + /data to :8003
+```
+
+```bash
+# Laptop:
 ssh -L 8880:localhost:5173 your_user@edges-cluster.example.com
 ```
 
-Now open `http://localhost:8880/` in your laptop's browser. Vite
-proxies API calls to `http://127.0.0.1:8000`, which is the same
-machine's `localhost` from the cluster's perspective — so the
-`VITE_API_URL` default (`http://127.0.0.1:8000`) is exactly right.
-
-> If you want a different local port (e.g. you already use 8880):
-> `ssh -L 9090:localhost:5173 …` then open `http://localhost:9090/`.
+`vite.config.ts` proxies API calls and `/data/*` to the backend on
+`8003`. The dev server is much slower than the built bundle over a
+slow SSH tunnel — only use it when you're iterating on UI code.
 
 ---
 
@@ -183,7 +208,8 @@ the resolved configuration.
 
 | Env var | Default | What it controls |
 |---|---|---|
-| `VITE_API_URL` | `http://127.0.0.1:8000` | Base URL the frontend uses for `/manifest.json`, `/latest_run`, `/save_outputs`, and the static-file mount. Vite inlines it at build time. **For dev (`npm run dev`), leave it unset** — Vite proxies to `localhost:8000` automatically. |
+| `VITE_API_URL` | *(empty — same-origin)* | Base URL the frontend uses for API calls. Vite inlines it at build time. Leave it unset — FastAPI serves the API on the same origin as the SPA (`/`), so same-origin works. Set only when serving the built `dist/` from a different host than the API. |
+| `VITE_PROXY_PORT` | `8003` | Port Vite's dev server proxies to (only matters for `npm run dev`). Override if you started uvicorn on a different port. |
 
 ---
 
@@ -318,7 +344,7 @@ gitignored.
 * **`e3_beam_factor.hickle` not found** — set
   `EDGES_BEAM_FACTOR_FILE` to the correct path on your cluster.
 * **Vite can't reach the backend** — make sure you started the
-  backend on `127.0.0.1:8000` *on the same machine as the frontend
+  backend on `127.0.0.1:8003` *on the same machine as the frontend
   dev server* (i.e. both running on the cluster, behind the same
   `ssh -L` tunnel).
 * **Browser shows stale data after a run** — every page refetches on

@@ -6,7 +6,7 @@
  */
 
 import { useEffect, useState } from "react"
-import Plot from "react-plotly.js"
+import Plot from "../utils/plotComponent"
 import { openDataFile } from "../utils/dataLoader"
 import type { Data } from "../utils/dataLoader"
 import { withBaseUrl } from "../utils/baseURL"

@@ -1,9 +1,13 @@
-import { useState } from "react"
+import { lazy, Suspense, useState } from "react"
 import { Link } from "react-router"
-import S11Plotter from "./S11Plotter"
-import SinglePlotter from "./SinglePlotter"
-import MultiPlotter from "./MultiPlotter"
-import HeatmapPlotter from "./HeatmapPlotter"
+
+// Lazy-loaded so plotly.js-basic-dist is only fetched when a page actually
+// renders plots. Home and Select stay light.
+const S11Plotter = lazy(() => import("./S11Plotter"))
+const SinglePlotter = lazy(() => import("./SinglePlotter"))
+const MultiPlotter = lazy(() => import("./MultiPlotter"))
+const HeatmapPlotter = lazy(() => import("./HeatmapPlotter"))
+
 import LatestRunBanner from "./LatestRunBanner"
 import { useManifest } from "../hooks/useManifest"
 import { useRunState } from "../state/RunContext"
@@ -16,6 +20,10 @@ import type {
   S11Plot,
   SinglePlot,
 } from "../types/manifest"
+
+function PlotFallback() {
+  return <div className="p-2 text-muted small">Loading plot…</div>
+}
 
 type Props = {
   page: PageName
@@ -80,31 +88,33 @@ export default function ManifestPage({ page, title }: Props) {
         </div>
       )}
       <div className="data-panel p-2">
-        {plots.map((plot) => {
-          switch (plot.type) {
-            case "s11":
-              return <S11Plotter key={plot.id} s11Input={plot as S11Plot} />
-            case "single":
-              return <SinglePlotter key={plot.id} input={plot as SinglePlot} />
-            case "multi":
-              return <MultiPlotter key={plot.id} input={plot as MultiPlot} />
-            case "image":
-              return (
-                <div key={plot.id} className="mb-3">
-                  <h3>{plot.title}</h3>
-                  <img
-                    src={withBaseUrl((plot as ImagePlot).filePath)}
-                    alt={plot.title}
-                    style={{ maxWidth: "100%" }}
-                  />
-                </div>
-              )
-            case "heatmap":
-              return <HeatmapPlotter key={plot.id} input={plot as HeatmapPlot} />
-            default:
-              return null
-          }
-        })}
+        <Suspense fallback={<PlotFallback />}>
+          {plots.map((plot) => {
+            switch (plot.type) {
+              case "s11":
+                return <S11Plotter key={plot.id} s11Input={plot as S11Plot} />
+              case "single":
+                return <SinglePlotter key={plot.id} input={plot as SinglePlot} />
+              case "multi":
+                return <MultiPlotter key={plot.id} input={plot as MultiPlot} />
+              case "image":
+                return (
+                  <div key={plot.id} className="mb-3">
+                    <h3>{plot.title}</h3>
+                    <img
+                      src={withBaseUrl((plot as ImagePlot).filePath)}
+                      alt={plot.title}
+                      style={{ maxWidth: "100%" }}
+                    />
+                  </div>
+                )
+              case "heatmap":
+                return <HeatmapPlotter key={plot.id} input={plot as HeatmapPlot} />
+              default:
+                return null
+            }
+          })}
+        </Suspense>
       </div>
     </>
   )
